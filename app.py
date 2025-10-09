@@ -34,9 +34,15 @@ def init_db():
         veli_tel TEXT,     -- +90 ile E.164 formatı önerilir
         takim TEXT,
         dogum_tarihi TEXT, -- YYYY-MM-DD
-        aktif_mi INTEGER DEFAULT 1
+        aktif_mi INTEGER DEFAULT 1,
+        uye_tipi TEXT DEFAULT 'Aylık'
     )
     """)
+    # Eski veritabanları için üyelik sütununu ekle
+    c.execute("PRAGMA table_info(students)")
+    columns = [row[1] for row in c.fetchall()]
+    if "uye_tipi" not in columns:
+        c.execute("ALTER TABLE students ADD COLUMN uye_tipi TEXT DEFAULT 'Aylık'")
     c.execute("""
         CREATE TABLE IF NOT EXISTS groups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,15 +197,15 @@ def upsert_student(row: dict, row_id: int | None):
     conn = get_conn()
     c = conn.cursor()
     if row_id:
-        c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, dogum_tarihi=?, aktif_mi=?
+        c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=?
                      WHERE id=?""",
                   (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                   row["dogum_tarihi"], int(row.get("aktif_mi",1)), row_id))
+                   row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık"), row_id))
     else:
-        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, dogum_tarihi, aktif_mi)
-                     VALUES(?,?,?,?,?,?,?)""",
+        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, dogum_tarihi, aktif_mi, uye_tipi)
+                     VALUES(?,?,?,?,?,?,?,?)""",
                   (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                   row["dogum_tarihi"], int(row.get("aktif_mi",1))))
+                   row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık")))
     conn.commit()
     conn.close()
 
@@ -338,12 +344,18 @@ with tab_students:
             takim = st.text_input("Grup (önce yukarıdan grup ekleyin)")
         dogum = st.date_input("Doğum Tarihi", value=date(2015,1,1))
         aktif = st.checkbox("Aktif", value=True)
+        uye_tipi = st.selectbox(
+            "Üyelik Süresi",
+            options=["Aylık", "3 Aylık", "6 Aylık", "Senelik"],
+            index=0,
+        )
         submitted = st.form_submit_button("Kaydet")
         if submitted:
             payload = {
                 "ad": ad.strip(), "soyad": soyad.strip(),
                 "veli_ad": veli_ad.strip(), "veli_tel": veli_tel.strip(),
                 "takim": takim.strip(), "dogum_tarihi": dogum.isoformat(),
+                "uye_tipi": uye_tipi,
                 "aktif_mi": 1 if aktif else 0
             }
             upsert_student(payload, row_id if row_id>0 else None)
