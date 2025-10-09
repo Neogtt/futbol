@@ -355,27 +355,79 @@ with tab_students:
 
     st.markdown("### Yeni / Güncelle")
     with st.form("student_form"):
-        row_id = st.number_input("ID (güncellemek için girin, yeni için boş bırakın)", min_value=0, step=1)
-        ad = st.text_input("Ad")
-        soyad = st.text_input("Soyad")
-        veli_ad = st.text_input("Veli Adı")
-        veli_tel = st.text_input("Veli Telefonu (+90...)")
+        student_records = df.to_dict("records")
+        select_options = {"— Yeni Öğrenci —": None}
+        for row in student_records:
+            label = f"#{int(row['id'])} • {str(row.get('ad') or '').strip()} {str(row.get('soyad') or '').strip()}"
+            select_options[label] = row
+
+        selected_label = st.selectbox(
+            "ID (güncellemek için seçin)",
+            options=list(select_options.keys()),
+            index=0,
+        )
+        selected_student = select_options.get(selected_label)
+
+        row_id = int(selected_student["id"]) if selected_student and selected_student.get("id") else 0
+        st.number_input(
+            "Seçilen Öğrenci ID", min_value=0, step=1, value=row_id, disabled=True
+        )
+
+        ad_default = str(selected_student.get("ad", "")) if selected_student else ""
+        soyad_default = str(selected_student.get("soyad", "")) if selected_student else ""
+        veli_ad_default = str(selected_student.get("veli_ad", "")) if selected_student else ""
+        veli_tel_default = str(selected_student.get("veli_tel", "")) if selected_student else ""
+
+        ad = st.text_input("Ad", value=ad_default)
+        soyad = st.text_input("Soyad", value=soyad_default)
+        veli_ad = st.text_input("Veli Adı", value=veli_ad_default)
+        veli_tel = st.text_input("Veli Telefonu (+90...)", value=veli_tel_default)
         group_names = df_g["ad"].tolist()
         if group_names:
+            takim_default = ""
+            if selected_student:
+                takim_default = str(selected_student.get("takim", "") or "")
+            takim_options = [""] + group_names
+            if takim_default and takim_default not in takim_options:
+                takim_options.append(takim_default)
+            takim_index = takim_options.index(takim_default) if takim_default in takim_options else 0
             takim = st.selectbox(
                 "Grup Seçin",
-                options=[""] + group_names,
-                index=0,
+                options=takim_options,
+                index=takim_index,
                 format_func=lambda x: "— Grup seçin —" if x == "" else x,
             )
         else:
-            takim = st.text_input("Grup (önce yukarıdan grup ekleyin)")
-        dogum = st.date_input("Doğum Tarihi", value=date(2015,1,1))
-        aktif = st.checkbox("Aktif", value=True)
+            takim_default = str(selected_student.get("takim", "")) if selected_student else ""
+            takim = st.text_input("Grup (önce yukarıdan grup ekleyin)", value=takim_default)
+
+        default_dogum = date(2015, 1, 1)
+        if selected_student:
+            dogum_val = selected_student.get("dogum_tarihi")
+            if isinstance(dogum_val, str) and dogum_val:
+                try:
+                    default_dogum = date.fromisoformat(dogum_val)
+                except ValueError:
+                    pass
+        dogum = st.date_input("Doğum Tarihi", value=default_dogum)
+
+        aktif_default = True
+        if selected_student:
+            aktif_val = selected_student.get("aktif_mi", 1)
+            try:
+                aktif_default = bool(int(aktif_val))
+            except (TypeError, ValueError):
+                aktif_default = True
+        aktif = st.checkbox("Aktif", value=aktif_default)
+        uye_options = ["Aylık", "3 Aylık", "6 Aylık", "Senelik"]
         uye_tipi = st.selectbox(
             "Üyelik Süresi",
-            options=["Aylık", "3 Aylık", "6 Aylık", "Senelik"],
-            index=0,
+            options=uye_options,
+            index=(
+                uye_options.index(selected_student.get("uye_tipi", "Aylık"))
+                if selected_student and selected_student.get("uye_tipi") in uye_options
+                else 0
+            ),
         )
         submitted = st.form_submit_button("Kaydet")
         pending_key = "pending_delete_student"
