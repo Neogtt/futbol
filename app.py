@@ -305,6 +305,16 @@ with tab_dash:
 # ---- Students
 with tab_students:
     st.header("👨‍👩‍👧‍👦 Öğrenciler")
+
+
+    group_success = st.session_state.pop("group_success", None)
+    if group_success:
+        st.success(group_success)
+
+    student_success = st.session_state.pop("student_success", None)
+    if student_success:
+        st.success(student_success)
+
     df = df_students()
     st.dataframe(df, use_container_width=True)
 
@@ -320,8 +330,8 @@ with tab_students:
         group_submitted = st.form_submit_button("Grup Ekle")
         if group_submitted:
             if add_group(new_group):
-                st.success("Grup eklendi. Listeyi güncellemek için sayfayı yenileyebilirsiniz.")
-                df_g = df_groups()
+                st.session_state["group_success"] = "Grup eklendi. Liste yenilendi."
+                st.experimental_rerun()
             else:
                 st.warning("Grup adı boş olamaz veya zaten mevcut.")
 
@@ -359,11 +369,20 @@ with tab_students:
                 "aktif_mi": 1 if aktif else 0
             }
             upsert_student(payload, row_id if row_id>0 else None)
-            st.success("Kaydedildi. Sol üstten 'Rerun' yapın veya sayfayı tazeleyin.")
+            st.session_state["student_success"] = "Öğrenci kaydı kaydedildi. Liste yenilendi."
+            st.experimental_rerun()
 
 # ---- Invoices
 with tab_invoices:
     st.header("🧾 Faturalar")
+    invoice_success = st.session_state.pop("invoice_success", None)
+    if invoice_success:
+        st.success(invoice_success)
+
+    payment_success = st.session_state.pop("payment_success", None)
+    if payment_success:
+        st.success(payment_success)
+
     df = df_invoices()
     st.dataframe(df, use_container_width=True)
 
@@ -379,7 +398,8 @@ with tab_invoices:
         vade = st.date_input("Son Ödeme Tarihi", value=date.today())
     if st.button("Fatura Oluştur"):
         add_invoice(student_id, donem, tutar, vade.isoformat())
-        st.success("Fatura eklendi.")
+        st.session_state["invoice_success"] = "Fatura eklendi. Liste yenilendi."
+        st.experimental_rerun()
 
     st.markdown("### Ödeme Al")
     col1, col2 = st.columns(2)
@@ -389,7 +409,8 @@ with tab_invoices:
         odeme_tutar = st.number_input("Ödenen Tutar", min_value=0.0, step=50.0)
     if st.button("Ödendi İşaretle"):
         mark_paid(inv_id, odeme_tutar)
-        st.success("Fatura ödendi olarak işaretlendi.")
+        st.session_state["payment_success"] = "Fatura ödendi olarak işaretlendi. Liste yenilendi."
+        st.experimental_rerun()
 
 # ---- WhatsApp Send
 with tab_whatsapp:
