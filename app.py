@@ -38,6 +38,12 @@ def init_db():
     )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ad TEXT UNIQUE
+    )
+    """)
+    c.execute("""
     CREATE TABLE IF NOT EXISTS invoices (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_id INTEGER,
@@ -160,6 +166,12 @@ def df_students() -> pd.DataFrame:
     conn.close()
     return df
 
+def df_groups() -> pd.DataFrame:
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM groups ORDER BY ad COLLATE NOCASE ASC", conn)
+    conn.close()
+    return df
+
 def df_invoices(join_students=True) -> pd.DataFrame:
     conn = get_conn()
     if join_students:
@@ -181,15 +193,29 @@ def upsert_student(row: dict, row_id: int | None):
     if row_id:
         c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, dogum_tarihi=?, aktif_mi=?
                      WHERE id=?""",
-                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row["takim"],
+                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
                    row["dogum_tarihi"], int(row.get("aktif_mi",1)), row_id))
     else:
         c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, dogum_tarihi, aktif_mi)
                      VALUES(?,?,?,?,?,?,?)""",
-                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row["takim"],
+                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
                    row["dogum_tarihi"], int(row.get("aktif_mi",1))))
     conn.commit()
     conn.close()
+
+def add_group(name: str):
+    name = name.strip()
+    if not name:
+        return False
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT OR IGNORE INTO groups(ad) VALUES(?)", (name,))
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        conn.close()
+
 
 def add_invoice(student_id: int, donem: str, tutar: float, son_odeme_tarihi: str):
     conn = get_conn()
@@ -275,6 +301,24 @@ with tab_students:
     st.header("👨‍👩‍👧‍👦 Öğrenciler")
     df = df_students()
     st.dataframe(df, use_container_width=True)
+
+    st.markdown("### Gruplar")
+    df_g = df_groups()
+    if df_g.empty:
+        st.info("Henüz grup eklenmedi. Aşağıdaki formu kullanarak yeni gruplar oluşturabilirsiniz.")
+    else:
+        st.dataframe(df_g, use_container_width=True)
+
+    with st.form("group_form"):
+        new_group = st.text_input("Yeni Grup Adı")
+        group_submitted = st.form_submit_button("Grup Ekle")
+        if group_submitted:
+            if add_group(new_group):
+                st.success("Grup eklendi. Listeyi güncellemek için sayfayı yenileyebilirsiniz.")
+                df_g = df_groups()
+            else:
+                st.warning("Grup adı boş olamaz veya zaten mevcut.")
+
     st.markdown("### Yeni / Güncelle")
     with st.form("student_form"):
         row_id = st.number_input("ID (güncellemek için girin, yeni için boş bırakın)", min_value=0, step=1)
@@ -282,7 +326,16 @@ with tab_students:
         soyad = st.text_input("Soyad")
         veli_ad = st.text_input("Veli Adı")
         veli_tel = st.text_input("Veli Telefonu (+90...)")
-        takim = st.text_input("Takım / Yaş Grubu")
+        group_names = df_g["ad"].tolist()
+        if group_names:
+            takim = st.selectbox(
+                "Grup Seçin",
+                options=[""] + group_names,
+                index=0,
+                format_func=lambda x: "— Grup seçin —" if x == "" else x,
+            )
+        else:
+            takim = st.text_input("Grup (önce yukarıdan grup ekleyin)")
         dogum = st.date_input("Doğum Tarihi", value=date(2015,1,1))
         aktif = st.checkbox("Aktif", value=True)
         submitted = st.form_submit_button("Kaydet")
