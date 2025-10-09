@@ -413,17 +413,18 @@ with tab_special:
 
     bmsg = st.text_area("Doğum günü mesajı", value="İyi ki doğdun! 🎂 Antrenmanda minik bir sürprizimiz var. ⚽️✨")
     if "veli_tel" in df_birth.columns:
+    bday_phones: List[str] = []
+    phones = ""
+    if "veli_tel" in df_birth.columns:
         bday_phones = [
-            str(x)
+            str(x).strip()
             for x in df_birth["veli_tel"].tolist()
             if pd.notna(x) and str(x).strip()
         ]
         phones = ",".join(bday_phones)
-    else:
-        bday_phones = []
-        phones = ""
-        if not df_birth.empty:
-            st.warning("Seçilen öğrenciler için veli telefonu bulunamadı.")
+    elif not df_birth.empty:
+        st.warning("Seçilen öğrenciler için veli telefonu bulunamadı.")
+        
     st.text_input("Hedef telefonlar", value=phones, key="bday_phones", disabled=True)
 
     if st.button("Doğum Günü Mesajlarını Gönder"):
