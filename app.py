@@ -419,18 +419,52 @@ with tab_whatsapp:
                 time.sleep(delay_sec)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
             if error_msgs:
-                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))            
+                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
+    st.markdown("#### Günü Geçmiş Aidatlar")
+    overdue = selectable[selectable["durum"] == "gecikti"]
+    st.dataframe(
+        overdue[["id", "ad", "soyad", "donem", "tutar", "son_odeme_tarihi", "veli_tel"]],
+        use_container_width=True,
+    )
+
+    overdue_options = {}
+    for _, row in overdue.iterrows():
+        tutar = float(row.tutar) if pd.notna(row.tutar) else 0.0
+        label = (
+            f"#{int(row.id)} • {str(row.ad or '').strip()} {str(row.soyad or '').strip()}"
+            f" • {row.son_odeme_tarihi} • {tutar:.0f} TL"
+        )
+        overdue_options[label] = int(row.id)
+    selected_labels = st.multiselect(
+        "Mesaj gönderilecek kayıtları seçin",
+        options=list(overdue_options.keys()),
+    )
+    selected_ids = [overdue_options[label] for label in selected_labels]
 
     st.markdown("#### Serbest Metin Gönder (24 saat penceresinde)")
-    free_text = st.text_area("Mesaj gövdesi", value="Merhaba, yardımcı olmamızı ister misiniz?")
-    send_to_phones = st.text_input("Telefon(lar) (+90… virgülle): +905XXXXXXXXX,+905YYYYYYYY")
-    if st.button("Toplu Serbest Metin Gönder"):
+
+    default_msg = (
+        "Sevgili Velimiz, ödenmemiş aidatınız bulunmaktadır. "
+        "Lütfen ödemenizi en kısa sürede yapınız."
+    )
+    free_text = st.text_area("Mesaj gövdesi", value=default_msg)
+    if st.button("Seçili Kişilere Mesaj Gönder"):
         if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
             st.error("WhatsApp ayarları eksik (token / phone number id).")
         else:
-            phones = [x.strip() for x in send_to_phones.split(",") if x.strip()]
+            if not selected_ids:
+                st.warning("Lütfen mesaj göndermek için listeden en az bir kayıt seçin.")
+                st.stop()
+            phones = [
+                str(x)
+                for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
+                if pd.notna(x) and str(x).strip()
+            ]
+            if not phones:
+                st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı.")
+                st.stop()
             sent, failed = 0, 0
-            error_msgs: List[str] = []            
+            error_msgs: List[str] = []       
             for p in phones:
                 resp = send_text(p, free_text)
                 status = _response_status_label(resp)
@@ -439,7 +473,7 @@ with tab_whatsapp:
                     sent += 1
                 else:
                     failed += 1
-                    error_msgs.append(f"{p}: {_response_error_message(resp)}")                    
+                    error_msgs.append(f"{p}: {_response_error_message(resp)}")                
                 time.sleep(1)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
             if error_msgs:
