@@ -412,16 +412,30 @@ with tab_special:
     st.dataframe(df_birth, use_container_width=True)
 
     bmsg = st.text_area("Doğum günü mesajı", value="İyi ki doğdun! 🎂 Antrenmanda minik bir sürprizimiz var. ⚽️✨")
-    phones = ",".join([str(x) for x in df_birth["veli_tel"].tolist()])
+    if "veli_tel" in df_birth.columns:
+        bday_phones = [
+            str(x)
+            for x in df_birth["veli_tel"].tolist()
+            if pd.notna(x) and str(x).strip()
+        ]
+        phones = ",".join(bday_phones)
+    else:
+        bday_phones = []
+        phones = ""
+        if not df_birth.empty:
+            st.warning("Seçilen öğrenciler için veli telefonu bulunamadı.")
     st.text_input("Hedef telefonlar", value=phones, key="bday_phones", disabled=True)
 
     if st.button("Doğum Günü Mesajlarını Gönder"):
         if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
             st.error("WhatsApp ayarları eksik (token / phone number id).")
         else:
+            if not bday_phones:
+                st.error("Gönderilecek veli telefonu bulunamadı.")
+                st.stop()            
             sent = failed = 0
             error_msgs: List[str] = []
-            for p in df_birth["veli_tel"].tolist():
+            for p in bday_phones:            
                 if not p:
                     continue
                 resp = send_text(p, bmsg)
