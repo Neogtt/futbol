@@ -412,7 +412,6 @@ with tab_special:
     st.dataframe(df_birth, use_container_width=True)
 
     bmsg = st.text_area("Doğum günü mesajı", value="İyi ki doğdun! 🎂 Antrenmanda minik bir sürprizimiz var. ⚽️✨")
-    if "veli_tel" in df_birth.columns:
     bday_phones: List[str] = []
     phones = ""
     if "veli_tel" in df_birth.columns:
