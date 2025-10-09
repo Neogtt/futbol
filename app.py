@@ -199,15 +199,26 @@ def upsert_student(row: dict, row_id: int | None):
     if row_id:
         c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=?
                      WHERE id=?""",
-                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                   row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık"), row_id))
+                 (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
+                  row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık"), row_id))
     else:
         c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, dogum_tarihi, aktif_mi, uye_tipi)
                      VALUES(?,?,?,?,?,?,?,?)""",
-                  (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                   row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık")))
+                 (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
+                  row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık")))
     conn.commit()
     conn.close()
+
+def delete_student(row_id: int) -> bool:
+    if not row_id:
+        return False
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM students WHERE id=?", (row_id,))
+    conn.commit()
+    deleted = c.rowcount > 0
+    conn.close()
+    return deleted
 
 def add_group(name: str):
     name = name.strip()
@@ -360,6 +371,11 @@ with tab_students:
             index=0,
         )
         submitted = st.form_submit_button("Kaydet")
+        confirm_delete = False
+        delete_pressed = False
+        if row_id:
+            confirm_delete = st.checkbox("Seçili öğrenciyi silmek istediğinizden emin misiniz?", value=False)
+            delete_pressed = st.form_submit_button("Seçili Öğrenciyi Sil", type="primary")
         if submitted:
             payload = {
                 "ad": ad.strip(), "soyad": soyad.strip(),
@@ -371,7 +387,18 @@ with tab_students:
             upsert_student(payload, row_id if row_id>0 else None)
             st.session_state["student_success"] = "Öğrenci kaydı kaydedildi. Liste yenilendi."
             st.experimental_rerun()
-
+        if delete_pressed:
+            if row_id <= 0:
+                st.warning("Silmek için geçerli bir ID girin.")
+            elif not confirm_delete:
+                st.warning("Lütfen silme onayı kutusunu işaretleyin.")
+            else:
+                if delete_student(int(row_id)):
+                    st.session_state["student_success"] = "Öğrenci kaydı silindi. Liste yenilendi."
+                    st.experimental_rerun()
+                else:
+                    st.warning("Belirtilen ID ile öğrenci bulunamadı.")
+                    
 # ---- Invoices
 with tab_invoices:
     st.header("🧾 Faturalar")
