@@ -9,8 +9,15 @@ import pandas as pd
 # ---------------------------
 st.set_page_config(page_title="Futbol Okulu • Tahsilat & WhatsApp", layout="wide")
 
-WHATSAPP_TOKEN = st.secrets.get("WHATSAPP_TOKEN", os.getenv("WHATSAPP_TOKEN", ""))
-WABA_PHONE_NUMBER_ID = st.secrets.get("WABA_PHONE_NUMBER_ID", os.getenv("WABA_PHONE_NUMBER_ID", ""))  # e.g. "1234567890"
+def _get_secret(name: str, default: str = "") -> str:
+    try:
+        return st.secrets[name]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(name, default)
+
+
+WHATSAPP_TOKEN = _get_secret("WHATSAPP_TOKEN")
+WABA_PHONE_NUMBER_ID = _get_secret("WABA_PHONE_NUMBER_ID")  # e.g. "1234567890"
 GRAPH_BASE = "https://graph.facebook.com/v20.0"
 
 if "DB_PATH" not in st.session_state:
@@ -342,7 +349,7 @@ with tab_students:
         if group_submitted:
             if add_group(new_group):
                 st.session_state["group_success"] = "Grup eklendi. Liste yenilendi."
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.warning("Grup adı boş olamaz veya zaten mevcut.")
 
@@ -371,11 +378,38 @@ with tab_students:
             index=0,
         )
         submitted = st.form_submit_button("Kaydet")
-        confirm_delete = False
-        delete_pressed = False
-        if row_id:
-            confirm_delete = st.checkbox("Seçili öğrenciyi silmek istediğinizden emin misiniz?", value=False)
-            delete_pressed = st.form_submit_button("Seçili Öğrenciyi Sil", type="primary")
+        pending_key = "pending_delete_student"
+        if pending_key in st.session_state:
+            if int(st.session_state[pending_key]) <= 0 or int(row_id) <= 0:
+                st.session_state.pop(pending_key, None)
+            elif st.session_state[pending_key] != int(row_id):
+                st.session_state.pop(pending_key, None)
+
+        pending_for = st.session_state.get(pending_key)
+        show_confirm = pending_for and int(row_id) > 0 and pending_for == int(row_id)
+        if show_confirm:
+            st.warning("Seçili öğrenciyi silmek istediğinizden emin misiniz?", icon="⚠️")
+            confirm_delete = st.form_submit_button("Evet, Sil", type="primary")
+            cancel_delete = st.form_submit_button("Vazgeç")
+            if confirm_delete:
+                if delete_student(int(row_id)):
+                    st.session_state.pop(pending_key, None)
+                    st.session_state["student_success"] = "Öğrenci kaydı silindi. Liste yenilendi."
+                    st.rerun()
+                else:
+                    st.warning("Belirtilen ID ile öğrenci bulunamadı.")
+                    st.session_state.pop(pending_key, None)
+                    st.rerun()
+            elif cancel_delete:
+                st.session_state.pop(pending_key, None)
+                st.rerun()
+        else:
+            if st.form_submit_button("Seçili Öğrenciyi Sil", type="primary"):
+                if int(row_id) <= 0:
+                    st.warning("Silmek için geçerli bir ID girin.")
+                else:
+                    st.session_state[pending_key] = int(row_id)
+                    st.rerun()
         if submitted:
             payload = {
                 "ad": ad.strip(), "soyad": soyad.strip(),
@@ -386,18 +420,9 @@ with tab_students:
             }
             upsert_student(payload, row_id if row_id>0 else None)
             st.session_state["student_success"] = "Öğrenci kaydı kaydedildi. Liste yenilendi."
-            st.experimental_rerun()
-        if delete_pressed:
-            if row_id <= 0:
-                st.warning("Silmek için geçerli bir ID girin.")
-            elif not confirm_delete:
-                st.warning("Lütfen silme onayı kutusunu işaretleyin.")
-            else:
-                if delete_student(int(row_id)):
-                    st.session_state["student_success"] = "Öğrenci kaydı silindi. Liste yenilendi."
-                    st.experimental_rerun()
-                else:
-                    st.warning("Belirtilen ID ile öğrenci bulunamadı.")
+            st.rerun()
+        if submitted and pending_key in st.session_state:
+            st.session_state.pop(pending_key, None)
                     
 # ---- Invoices
 with tab_invoices:
@@ -426,7 +451,7 @@ with tab_invoices:
     if st.button("Fatura Oluştur"):
         add_invoice(student_id, donem, tutar, vade.isoformat())
         st.session_state["invoice_success"] = "Fatura eklendi. Liste yenilendi."
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("### Ödeme Al")
     col1, col2 = st.columns(2)
@@ -437,7 +462,7 @@ with tab_invoices:
     if st.button("Ödendi İşaretle"):
         mark_paid(inv_id, odeme_tutar)
         st.session_state["payment_success"] = "Fatura ödendi olarak işaretlendi. Liste yenilendi."
-        st.experimental_rerun()
+        st.rerun()
 
 # ---- WhatsApp Send
 with tab_whatsapp:
