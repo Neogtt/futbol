@@ -80,8 +80,20 @@ init_db()
 def wa_headers():
     return {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
-def send_template(to_phone_e164: str, template_name: str, lang_code="tr", body_params: List[str] = None) -> Dict[str, Any]:
+def _post_whatsapp_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{GRAPH_BASE}/{WABA_PHONE_NUMBER_ID}/messages"
+    try:
+        r = requests.post(url, json=payload, headers=wa_headers(), timeout=30)
+        try:
+            data = r.json() if r.content else {}
+        except ValueError:
+            data = {"raw": r.text}
+        return {"status_code": r.status_code, "data": data}
+    except requests.RequestException as exc:
+        return {"status_code": None, "error": str(exc), "data": {}}
+
+
+def send_template(to_phone_e164: str, template_name: str, lang_code="tr", body_params: List[str] = None) -> Dict[str, Any]:
     payload = {
         "messaging_product": "whatsapp",
         "to": to_phone_e164,
@@ -97,19 +109,39 @@ def send_template(to_phone_e164: str, template_name: str, lang_code="tr", body_p
             "type": "body",
             "parameters": [{"type": "text", "text": str(x)} for x in body_params]
         })
-    r = requests.post(url, json=payload, headers=wa_headers(), timeout=30)
-    return {"status_code": r.status_code, "data": r.json() if r.content else {}}
+    return _post_whatsapp_payload(payload)
 
 def send_text(to_phone_e164: str, text: str) -> Dict[str, Any]:
-    url = f"{GRAPH_BASE}/{WABA_PHONE_NUMBER_ID}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": to_phone_e164,
         "type": "text",
         "text": {"body": text}
     }
-    r = requests.post(url, json=payload, headers=wa_headers(), timeout=30)
-    return {"status_code": r.status_code, "data": r.json() if r.content else {}}
+
+    return _post_whatsapp_payload(payload)
+
+
+def _response_status_label(resp: Dict[str, Any]) -> str:
+    code = resp.get("status_code")
+    if isinstance(code, int) and 200 <= code < 300:
+        return "ok"
+    if resp.get("error"):
+        return "err_request"
+    return f"err_{code if code is not None else 'unknown'}"
+
+
+def _response_error_message(resp: Dict[str, Any]) -> str:
+    if resp.get("error"):
+        return str(resp["error"])
+    data = resp.get("data")
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            return err.get("message") or str(err)
+        if data:
+            return str(data)
+    return "Bilinmeyen hata"
 
 def log_msg(phone: str, template_name: str, msg_type: str, payload: str, status: str):
     conn = get_conn()
@@ -317,20 +349,24 @@ with tab_whatsapp:
             ids = [int(x.strip()) for x in send_to_ids.split(",") if x.strip().isdigit()]
             body_params = [x.strip() for x in body_params_raw.split(",")] if body_params_raw.strip() else []
             sent, failed = 0, 0
+            error_msgs: List[str] = []            
             for iid in ids:
                 hit = selectable[selectable["id"]==iid]
                 if hit.empty:
                     continue
                 phone = hit.iloc[0]["veli_tel"]
                 resp = send_template(phone, template_name, lang_code, body_params)
-                status = "ok" if 200 <= resp["status_code"] < 300 else f"err_{resp['status_code']}"
+                status = _response_status_label(resp)
                 log_msg(phone, template_name, "template", str(body_params), status)
                 if status=="ok":
                     sent += 1
                 else:
                     failed += 1
+                    error_msgs.append(f"{phone}: {_response_error_message(resp)}")                    
                 time.sleep(delay_sec)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+            if error_msgs:
+                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))            
 
     st.markdown("#### Serbest Metin Gönder (24 saat penceresinde)")
     free_text = st.text_area("Mesaj gövdesi", value="Merhaba, yardımcı olmamızı ister misiniz?")
@@ -341,16 +377,20 @@ with tab_whatsapp:
         else:
             phones = [x.strip() for x in send_to_phones.split(",") if x.strip()]
             sent, failed = 0, 0
+            error_msgs: List[str] = []            
             for p in phones:
                 resp = send_text(p, free_text)
-                status = "ok" if 200 <= resp["status_code"] < 300 else f"err_{resp['status_code']}"
+                status = _response_status_label(resp)
                 log_msg(p, "-", "text", free_text, status)
                 if status=="ok":
                     sent += 1
                 else:
                     failed += 1
+                    error_msgs.append(f"{p}: {_response_error_message(resp)}")                    
                 time.sleep(1)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+            if error_msgs:
+                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
 
 # ---- Logs
 with tab_logs:
@@ -379,14 +419,20 @@ with tab_special:
         if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
             st.error("WhatsApp ayarları eksik (token / phone number id).")
         else:
-            sent=failed=0
+            sent = failed = 0
+            error_msgs: List[str] = []
             for p in df_birth["veli_tel"].tolist():
-                if not p: 
+                if not p:
                     continue
                 resp = send_text(p, bmsg)
-                status = "ok" if 200 <= resp["status_code"] < 300 else f"err_{resp['status_code']}"
+                status = _response_status_label(resp)
                 log_msg(p, "-", "text", bmsg, status)
-                sent += 1 if status=="ok" else 0
-                failed += 1 if status!="ok" else 0
+                if status=="ok":
+                    sent += 1
+                else:
+                    failed += 1
+                    error_msgs.append(f"{p}: {_response_error_message(resp)}")
                 time.sleep(1)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+            if error_msgs:
+                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))            
