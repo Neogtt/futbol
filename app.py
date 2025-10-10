@@ -113,12 +113,24 @@ def export_db_to_excel_bytes() -> bytes:
     finally:
         conn.close()
 
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        for sheet_name, df in sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    buffer.seek(0)
-    return buffer.getvalue()
+    def _write_excel(engine: str) -> bytes:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine=engine) as writer:
+            for sheet_name, df in sheets.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        buffer.seek(0)
+        return buffer.getvalue()
+
+    try:
+        return _write_excel("openpyxl")
+    except ModuleNotFoundError:
+        try:
+            return _write_excel("xlsxwriter")
+        except ModuleNotFoundError as fallback_exc:
+            raise RuntimeError(
+                "Excel dışa aktarma işlemi için 'openpyxl' veya 'XlsxWriter' paketlerinden"
+                " en az birinin kurulu olması gerekir."
+            ) from fallback_exc
 
 
 def _normalize_import_value(value, column: str):
