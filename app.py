@@ -1,4 +1,4 @@
-import os, time, sqlite3, requests
+import os, time, sqlite3, requests, io
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any
 import streamlit as st
@@ -94,6 +94,142 @@ def init_db():
     conn.close()
 
 init_db()
+
+# ---------------------------
+# Backup & Restore Helpers
+# ---------------------------
+
+
+def export_db_to_excel_bytes() -> bytes:
+    """Return the entire veritabanı as an Excel workbook (bytes)."""
+    conn = get_conn()
+    sheets: dict[str, pd.DataFrame] = {}
+    try:
+        for table in ["students", "groups", "invoices", "payments", "msg_log"]:
+            try:
+                sheets[table] = pd.read_sql_query(f"SELECT * FROM {table}", conn)
+            except Exception:
+                sheets[table] = pd.DataFrame()
+    finally:
+        conn.close()
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _normalize_import_value(value, column: str):
+    if pd.isna(value):
+        return None
+    if column in {"id", "student_id", "invoice_id", "aktif_mi"}:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (float, int)) and not pd.isna(value):
+            return int(value)
+        value_str = str(value).strip()
+        if value_str.isdigit():
+            return int(value_str)
+        raise ValueError(f"{column} sütunu için sayısal değer bekleniyor: {value}")
+    if column in {"tutar"}:
+        if isinstance(value, (float, int)):
+            return float(value)
+        value_str = str(value).replace(",", ".").strip()
+        try:
+            return float(value_str)
+        except ValueError as exc:  # pragma: no cover - format guard
+            raise ValueError(f"{column} sütunu için sayısal değer bekleniyor: {value}") from exc
+    if column in {"dogum_tarihi", "son_odeme_tarihi", "tarih"}:
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, str):
+            return value.strip()
+        raise ValueError(f"{column} sütunu için tarih değeri bekleniyor: {value}")
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return value
+
+
+def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
+    """İçe aktarma işlemi; başarı durumunu ve mesajları döner."""
+    try:
+        sheets = pd.read_excel(uploaded_file, sheet_name=None)
+    except Exception as exc:  # pragma: no cover - kullanıcı girdisi
+        return False, [f"Excel dosyası okunamadı: {exc}"]
+
+    expected_columns = {
+        "students": [
+            "id",
+            "ad",
+            "soyad",
+            "veli_ad",
+            "veli_tel",
+            "takim",
+            "dogum_tarihi",
+            "aktif_mi",
+            "uye_tipi",
+        ],
+        "groups": ["id", "ad"],
+        "invoices": [
+            "id",
+            "student_id",
+            "donem",
+            "tutar",
+            "son_odeme_tarihi",
+            "durum",
+        ],
+        "payments": ["id", "invoice_id", "tarih", "tutar", "aciklama"],
+        "msg_log": ["id", "phone", "template_name", "msg_type", "payload", "status", "ts"],
+    }
+
+    processed: list[str] = []
+    conn = get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        for table, columns in expected_columns.items():
+            df = sheets.get(table)
+            if df is None:
+                continue
+            missing = [col for col in columns if col not in df.columns]
+            if missing:
+                raise ValueError(f"{table} sayfasında eksik sütunlar: {', '.join(missing)}")
+            subset = df[columns].copy()
+            cursor.execute(f"DELETE FROM {table}")
+            try:
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+            except sqlite3.Error:
+                pass
+            if subset.empty:
+                processed.append(f"{table}: 0 satır aktarıldı")
+                continue
+            rows = []
+            for row in subset.itertuples(index=False, name=None):
+                cleaned = []
+                for col_name, cell in zip(columns, row):
+                    cleaned.append(_normalize_import_value(cell, col_name))
+                rows.append(tuple(cleaned))
+            placeholders = ",".join(["?"] * len(columns))
+            column_sql = ",".join(columns)
+            cursor.executemany(
+                f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})",
+                rows,
+            )
+            processed.append(f"{table}: {len(rows)} satır aktarıldı")
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        return False, [str(exc)]
+    finally:
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.Error:
+            pass
+        conn.close()
+
+    return True, processed if processed else ["Excel dosyasında beklenen sayfalar bulunamadı"]
 
 # ---------------------------
 # WhatsApp Cloud API
@@ -300,6 +436,41 @@ with st.sidebar:
     st.caption("Ödeme Takip + WhatsApp")
     st.markdown("---")
     st.warning(_db_persistence_note())
+
+
+    excel_bytes = export_db_to_excel_bytes()
+    st.markdown("### 📁 Excel Yedekleme / Aktarma")
+    st.download_button(
+        "📤 Excel olarak dışa aktar",
+        data=excel_bytes,
+        file_name=f"futbol_okulu_{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Tüm tablo verilerini Excel formatında indir.",
+    )
+
+    import_feedback = st.session_state.pop("import_feedback", None)
+    if import_feedback:
+        status, messages = import_feedback
+        msg_text = "\n".join(messages)
+        if status == "success":
+            st.success(msg_text)
+        else:
+            st.error(msg_text)
+
+    with st.form("excel_import_form"):
+        st.caption("Excel içe aktarma mevcut verileri günceller. Lütfen önce yedek alın.")
+        uploaded_excel = st.file_uploader("Excel (.xlsx) seç", type=["xlsx"], key="excel_import_file")
+        import_submitted = st.form_submit_button("📥 Excel'den içe aktar")
+        if import_submitted:
+            if not uploaded_excel:
+                st.warning("Lütfen içe aktarmak için bir Excel dosyası seçin.")
+            else:
+                success, messages = import_db_from_excel(uploaded_excel)
+                status = "success" if success else "error"
+                st.session_state["import_feedback"] = (status, messages)
+                st.rerun()
+    
+    
     st.subheader("WhatsApp Ayarları")
     st.text_input("WABA_PHONE_NUMBER_ID", value=WABA_PHONE_NUMBER_ID, disabled=True)
     st.text_input("WHATSAPP_TOKEN (st.secrets)", value=("●"*10 if WHATSAPP_TOKEN else "—"), disabled=True)
