@@ -493,6 +493,52 @@ def _response_status_label(resp: Dict[str, Any]) -> str:
         return "err_request"
     return f"err_{code if code is not None else 'unknown'}"
 
+_WHATSAPP_ERROR_HINTS = {
+    (131030, None): (
+        "Numara Meta WhatsApp işletme hesabınızın izin verilen alıcılar listesinde değil. "
+        "WhatsApp Manager → Phone numbers bölümünden \"Allowed recipients\" listesine "
+        "veli numarasını ekleyin."
+    ),
+}
+
+
+def _format_whatsapp_error(err: Dict[str, Any]) -> str | None:
+    if not isinstance(err, dict):
+        return None
+
+    message = err.get("message")
+    code = err.get("code")
+    subcode = err.get("error_subcode")
+
+    normalized_codes: List[tuple[int, Any]] = []
+
+    if isinstance(code, numbers.Integral):
+        norm_code = int(code)
+        norm_subcode = int(subcode) if isinstance(subcode, numbers.Integral) else subcode
+        normalized_codes.append((norm_code, norm_subcode))
+        normalized_codes.append((norm_code, None))
+    elif isinstance(code, str) and code.isdigit():
+        norm_code = int(code)
+        if isinstance(subcode, str) and subcode.isdigit():
+            normalized_codes.append((norm_code, int(subcode)))
+        normalized_codes.append((norm_code, None))
+
+    for key in normalized_codes:
+        hint = _WHATSAPP_ERROR_HINTS.get(key)
+        if hint:
+            if isinstance(message, str) and message.strip():
+                return f"{message.strip()} — {hint}"
+            return hint
+
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+
+    for alt_key in ("error_user_msg", "error_user_title", "details", "summary"):
+        value = err.get(alt_key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
 
 def _response_error_message(resp: Dict[str, Any]) -> str:
     if resp.get("error"):
@@ -501,7 +547,10 @@ def _response_error_message(resp: Dict[str, Any]) -> str:
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict):
-            return err.get("message") or str(err)
+            formatted = _format_whatsapp_error(err)
+            if formatted:
+                return formatted
+            return str(err)
         if data:
             return str(data)
     return "Bilinmeyen hata"
