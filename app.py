@@ -123,7 +123,7 @@ def export_db_to_excel_bytes() -> bytes:
         buffer.seek(0)
         return buffer.getvalue()
 
-        def _column_letter(idx: int) -> str:
+    def _column_letter(idx: int) -> str:
         letters = []
         while idx > 0:
             idx, remainder = divmod(idx - 1, 26)
