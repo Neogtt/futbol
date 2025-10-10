@@ -20,8 +20,10 @@ WHATSAPP_TOKEN = _get_secret("WHATSAPP_TOKEN")
 WABA_PHONE_NUMBER_ID = _get_secret("WABA_PHONE_NUMBER_ID")  # e.g. "1234567890"
 GRAPH_BASE = "https://graph.facebook.com/v20.0"
 
+DEFAULT_DB_PATH = "futbol_okulu.db"
+
 if "DB_PATH" not in st.session_state:
-    st.session_state.DB_PATH = "futbol_okulu.db"
+    st.session_state.DB_PATH = DEFAULT_DB_PATH
 
 # ---------------------------
 # DB Helpers
@@ -274,10 +276,30 @@ def compute_status_rollover():
 # ---------------------------
 # UI — Sidebar
 # ---------------------------
+def _db_persistence_note() -> str:
+    """Explain how the SQLite dosyası saklanıyor and warn about resets."""
+    path = st.session_state.get("DB_PATH", DEFAULT_DB_PATH)
+    if not os.path.isabs(path):
+        path = os.path.abspath(path)
+    if os.path.exists(path):
+        ts = datetime.fromtimestamp(os.path.getmtime(path))
+        formatted = ts.strftime("%d %B %Y %H:%M")
+        return (
+            "Veriler bu sunucuda yerel bir SQLite dosyasında tutulur. "
+            "Sunucu yeniden başlatılırsa ya da uygulama yeniden dağıtılırsa dosya sıfırlanabilir. "
+            f"Mevcut dosya yolu: `{path}` (son güncelleme: {formatted})."
+        )
+    return (
+        "Veriler yerel bir SQLite dosyasında saklanır. Sunucu yeniden başlarsa bu dosya yeniden "
+        "oluşacağı için daha önceki kayıtlar kaybolabilir. Düzenli yedek almayı unutmayın."
+    )
+
+
 with st.sidebar:
     st.title("⚽ Futbol Okulu")
     st.caption("Ödeme Takip + WhatsApp")
     st.markdown("---")
+    st.warning(_db_persistence_note())
     st.subheader("WhatsApp Ayarları")
     st.text_input("WABA_PHONE_NUMBER_ID", value=WABA_PHONE_NUMBER_ID, disabled=True)
     st.text_input("WHATSAPP_TOKEN (st.secrets)", value=("●"*10 if WHATSAPP_TOKEN else "—"), disabled=True)
