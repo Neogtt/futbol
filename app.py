@@ -918,102 +918,121 @@ with tab_invoices:
 # ---- WhatsApp Send
 with tab_whatsapp:
     st.header("📲 WhatsApp Gönder")
-    st.markdown("**İlk temas mesajları şablon olmalı.** 24 saat penceresinde serbest metin gönderebilirsiniz.")
+
     df = df_invoices()
-    selectable = df[(df["durum"].isin(["bekliyor", "gecikti"])) & df["veli_tel"].notna()]
-    st.markdown("### Hedef Listesi (bekleyen/geciken)")
-    st.dataframe(selectable[["id","ad","soyad","donem","tutar","son_odeme_tarihi","durum","veli_tel"]], use_container_width=True)
+    overdue = df[(df["durum"] == "gecikti") & df["veli_tel"].notna()].copy()    
+    if overdue.empty:
+        st.info("Vadesi geçen aidat bulunmuyor.")
+        st.session_state.whatsapp_overdue_selected = set()
+        st.session_state.select_all_overdue = False
+    else:
+        if "whatsapp_overdue_selected" not in st.session_state:
+            st.session_state.whatsapp_overdue_selected = set()
 
-    st.markdown("#### Şablon Gönder")
-    template_name = st.text_input("Template adı", value="tuition_reminder_v1")
-    lang_code = st.text_input("Dil kodu", value="tr")
-    body_params_raw = st.text_input("Body parametreleri (virgülle: Ali,Ekim 2025,10 Ekim 2025,1500)")
-    send_to_ids = st.text_input("Gönderilecek Fatura ID'leri (virgülle: 12,13,15)")
-    delay_sec = st.number_input("Mesajlar arası gecikme (sn)", min_value=0, max_value=30, value=2)
+        current_ids = set(int(x) for x in overdue["id"].tolist())
+        st.session_state.whatsapp_overdue_selected = {
+            sid for sid in st.session_state.whatsapp_overdue_selected if sid in current_ids
+        }
 
-    if st.button("Toplu Şablon Gönder"):
-        if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
-            st.error("WhatsApp ayarları eksik (token / phone number id).")
-        else:
-            ids = [int(x.strip()) for x in send_to_ids.split(",") if x.strip().isdigit()]
-            body_params = [x.strip() for x in body_params_raw.split(",")] if body_params_raw.strip() else []
-            sent, failed = 0, 0
-            error_msgs: List[str] = []            
-            for iid in ids:
-                hit = selectable[selectable["id"]==iid]
-                if hit.empty:
-                    continue
-                phone = hit.iloc[0]["veli_tel"]
-                resp = send_template(phone, template_name, lang_code, body_params)
-                status = _response_status_label(resp)
-                log_msg(phone, template_name, "template", str(body_params), status)
-                if status=="ok":
-                    sent += 1
-                else:
-                    failed += 1
-                    error_msgs.append(f"{phone}: {_response_error_message(resp)}")                    
-                time.sleep(delay_sec)
-            st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-            if error_msgs:
-                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
-    st.markdown("#### Günü Geçmiş Aidatlar")
-    overdue = selectable[selectable["durum"] == "gecikti"]
-    st.dataframe(
-        overdue[["id", "ad", "soyad", "donem", "tutar", "son_odeme_tarihi", "veli_tel"]],
-        use_container_width=True,
-    )
-
-    overdue_options = {}
-    for _, row in overdue.iterrows():
-        tutar = float(row.tutar) if pd.notna(row.tutar) else 0.0
-        label = (
-            f"#{int(row.id)} • {str(row.ad or '').strip()} {str(row.soyad or '').strip()}"
-            f" • {row.son_odeme_tarihi} • {tutar:.0f} TL"
+        all_selected = (
+            len(st.session_state.whatsapp_overdue_selected) == len(current_ids)
+            and len(current_ids) > 0
         )
-        overdue_options[label] = int(row.id)
-    selected_labels = st.multiselect(
-        "Mesaj gönderilecek kayıtları seçin",
-        options=list(overdue_options.keys()),
-    )
-    selected_ids = [overdue_options[label] for label in selected_labels]
+        select_all = st.checkbox("Tümünü Seç", value=all_selected, key="select_all_overdue")
+        if select_all and not all_selected:
+            st.session_state.whatsapp_overdue_selected = set(current_ids)
+        elif not select_all and all_selected:
+            st.session_state.whatsapp_overdue_selected = set()
 
-    st.markdown("#### Serbest Metin Gönder (24 saat penceresinde)")
+        display_df = overdue[[
+            "id",
+            "ad",
+            "soyad",
+            "donem",
+            "tutar",
+            "son_odeme_tarihi",
+            "veli_tel",
+]].copy()
+        display_df.rename(
+            columns={
+                "id": "Fatura ID",
+                "ad": "Ad",
+                "soyad": "Soyad",
+                "donem": "Dönem",
+                "tutar": "Tutar",
+                "son_odeme_tarihi": "Son Ödeme Tarihi",
+                "veli_tel": "Veli Telefonu",
+            },
+            inplace=True,
+        )
+        display_df["Seç"] = display_df["Fatura ID"].apply(
+            lambda x: int(x) in st.session_state.whatsapp_overdue_selected
+        )
 
-    default_msg = (
-        "Sevgili Velimiz, ödenmemiş aidatınız bulunmaktadır. "
-        "Lütfen ödemenizi en kısa sürede yapınız."
-    )
-    free_text = st.text_area("Mesaj gövdesi", value=default_msg)
-    if st.button("Seçili Kişilere Mesaj Gönder"):
-        if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
-            st.error("WhatsApp ayarları eksik (token / phone number id).")
-        else:
-            if not selected_ids:
-                st.warning("Lütfen mesaj göndermek için listeden en az bir kayıt seçin.")
-                st.stop()
-            phones = [
-                str(x)
-                for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
-                if pd.notna(x) and str(x).strip()
-            ]
-            if not phones:
-                st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı.")
-                st.stop()
-            sent, failed = 0, 0
-            error_msgs: List[str] = []       
-            for p in phones:
-                resp = send_text(p, free_text)
-                status = _response_status_label(resp)
-                log_msg(p, "-", "text", free_text, status)
-                if status=="ok":
-                    sent += 1
-                else:
-                    failed += 1
-                    error_msgs.append(f"{p}: {_response_error_message(resp)}")                
-                time.sleep(1)
-            st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-            if error_msgs:
-                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
+        edited_df = st.data_editor(
+            display_df,
+            column_config={
+                "Seç": st.column_config.CheckboxColumn("Seç", default=False),
+                "Tutar": st.column_config.NumberColumn("Tutar", format="%d TL"),
+            },
+            hide_index=True,
+            disabled=[
+                "Fatura ID",
+                "Ad",
+                "Soyad",
+                "Dönem",
+                "Tutar",
+                "Son Ödeme Tarihi",
+                "Veli Telefonu",
+            ],
+            use_container_width=True,
+            key="overdue_editor",
+        )
+
+        selected_ids = [
+            int(row["Fatura ID"])
+            for _, row in edited_df.iterrows()
+            if bool(row.get("Seç"))
+        ]
+        st.session_state.whatsapp_overdue_selected = set(selected_ids)
+        st.session_state.select_all_overdue = (
+            len(selected_ids) == len(current_ids) and len(current_ids) > 0
+        )
+
+        message_text = "Sayın velimiz Lütfen geciken ödemenizi en kısa sürede yapınız."
+        st.markdown(f"**Gönderilecek Mesaj:** {message_text}")
+
+        if st.button("Seçili Velilere Mesaj Gönder"):
+            if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
+                st.error("WhatsApp ayarları eksik (token / phone number id).")
+            else:
+                if not selected_ids:
+                    st.warning("Lütfen mesaj göndermek için listeden en az bir veli seçin.")
+                    st.stop()
+                phones = [
+                    str(x).strip()
+                    for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
+                    if pd.notna(x) and str(x).strip()
+                ]
+                if not phones:
+                    st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı.")
+                    st.stop()
+                sent = failed = 0
+                error_msgs: List[str] = []
+                for phone in phones:
+                    resp = send_text(phone, message_text)
+                    status = _response_status_label(resp)
+                    log_msg(phone, "-", "text", message_text, status)
+                    if status == "ok":
+                        sent += 1
+                    else:
+                        failed += 1
+                        error_msgs.append(f"{phone}: {_response_error_message(resp)}")
+                    time.sleep(1)
+
+                st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+                if error_msgs:
+                    st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
 
 # ---- Logs
 with tab_logs:
