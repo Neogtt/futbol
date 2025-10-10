@@ -1,6 +1,8 @@
-import os, time, sqlite3, requests, io
+import os, time, sqlite3, requests, io, zipfile
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any
+from xml.sax.saxutils import escape
+import numbers
 import streamlit as st
 import pandas as pd
 
@@ -121,16 +123,208 @@ def export_db_to_excel_bytes() -> bytes:
         buffer.seek(0)
         return buffer.getvalue()
 
+        def _column_letter(idx: int) -> str:
+        letters = []
+        while idx > 0:
+            idx, remainder = divmod(idx - 1, 26)
+            letters.append(chr(65 + remainder))
+        return "".join(reversed(letters)) or "A"
+
+    def _sanitize_sheet_name(name: str, position: int, used: set[str]) -> str:
+        invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
+        sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
+        sanitized = sanitized or f"Sheet{position}"
+        if len(sanitized) > 31:
+            sanitized = sanitized[:31]
+        candidate = sanitized
+        suffix = 1
+        while candidate in used:
+            suffix_str = f"_{suffix}"
+            candidate = sanitized[: 31 - len(suffix_str)] + suffix_str
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
+    def _write_simple_xlsx() -> bytes:
+        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        buffer = io.BytesIO()
+        sheet_entries: list[tuple[str, str]] = []
+        used_names: set[str] = set()
+
+        for idx, (original_name, df) in enumerate(sheets.items(), start=1):
+            sheet_name = _sanitize_sheet_name(original_name, idx, used_names)
+            rows: list[list[Any]] = []
+            if list(df.columns):
+                rows.append([str(col) for col in df.columns])
+            for record in df.itertuples(index=False, name=None):
+                row_values: list[Any] = []
+                for value in record:
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        row_values.append("")
+                    else:
+                        row_values.append(value)
+                rows.append(row_values)
+
+            max_columns = max((len(r) for r in rows), default=0)
+            max_rows = len(rows)
+            if max_rows == 0:
+                max_rows = 1
+            if max_columns == 0:
+                dimension = "A1"
+            else:
+                dimension = f"A1:{_column_letter(max_columns)}{max_rows}"
+
+            cells_xml: list[str] = []
+            for r_idx, row in enumerate(rows, start=1):
+                cell_xml: list[str] = []
+                for c_idx in range(1, max_columns + 1):
+                    cell_ref = f"{_column_letter(c_idx)}{r_idx}"
+                    try:
+                        value = row[c_idx - 1]
+                    except IndexError:
+                        value = ""
+                    if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+                        cell_xml.append(f"<c r=\"{cell_ref}\"/>")
+                        continue
+                    if isinstance(value, numbers.Number) and not isinstance(value, bool):
+                        cell_xml.append(
+                            f"<c r=\"{cell_ref}\"><v>{value}</v></c>"
+                        )
+                        continue
+                    if isinstance(value, bool):
+                        cell_xml.append(
+                            f"<c r=\"{cell_ref}\" t=\"b\"><v>{int(value)}</v></c>"
+                        )
+                        continue
+                    text_value = str(value)
+                    if text_value == "":
+                        cell_xml.append(f"<c r=\"{cell_ref}\"/>")
+                    else:
+                        cell_xml.append(
+                            "<c r=\"{ref}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>".format(
+                                ref=cell_ref,
+                                text=escape(text_value),
+                            )
+                        )
+                cells_xml.append(
+                    f"<row r=\"{r_idx}\">{''.join(cell_xml)}</row>"
+                )
+
+            sheet_xml = (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\""
+                " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                f"<dimension ref=\"{dimension}\"/>"
+                "<sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>"
+                "<sheetFormatPr defaultRowHeight=\"15\"/>"
+                f"<sheetData>{''.join(cells_xml)}</sheetData>"
+                "</worksheet>"
+            )
+            sheet_entries.append((sheet_name, sheet_xml))
+
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+                "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+                "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+                "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+                "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+                + "".join(
+                    f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" "
+                    "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+                    for idx in range(1, len(sheet_entries) + 1)
+                )
+                + "</Types>",
+            )
+            zf.writestr(
+                "_rels/.rels",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
+                "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>"
+                "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" Target=\"docProps/app.xml\"/>"
+                "</Relationships>",
+            )
+            zf.writestr(
+                "docProps/core.xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
+                "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
+                "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
+                "<dc:creator>Futbol Okulu</dc:creator>"
+                "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
+                f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:created>"
+                f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:modified>"
+                "</cp:coreProperties>",
+            )
+            zf.writestr(
+                "docProps/app.xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
+                "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
+                "<Application>Futbol Okulu</Application>"
+                "</Properties>",
+            )
+
+            def _escape_sheet_attr(value: str) -> str:
+                return escape(value, {'"': '&quot;'})
+
+            workbook_sheets_xml = "".join(
+                f"<sheet name=\"{_escape_sheet_attr(name)}\" sheetId=\"{idx}\" r:id=\"rId{idx}\"/>"
+                for idx, (name, _) in enumerate(sheet_entries, start=1)
+            )
+            zf.writestr(
+                "xl/workbook.xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+                "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                "<bookViews><workbookView/></bookViews>"
+                f"<sheets>{workbook_sheets_xml}</sheets>"
+                "</workbook>",
+            )
+
+            workbook_rels_xml = "".join(
+                f"<Relationship Id=\"rId{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{idx}.xml\"/>"
+                for idx in range(1, len(sheet_entries) + 1)
+            )
+            workbook_rels_xml += "<Relationship Id=\"rId{0}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>".format(len(sheet_entries) + 1)
+            zf.writestr(
+                "xl/_rels/workbook.xml.rels",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                f"{workbook_rels_xml}"
+                "</Relationships>",
+            )
+
+            zf.writestr(
+                "xl/styles.xml",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+                "<fonts count=\"1\"><font><sz val=\"11\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/></font></fonts>"
+                "<fills count=\"1\"><fill><patternFill patternType=\"none\"/></fill></fills>"
+                "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"
+                "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+                "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs>"
+                "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+                "</styleSheet>",
+            )
+
+            for idx, (_, sheet_xml) in enumerate(sheet_entries, start=1):
+                zf.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml)
+
+        buffer.seek(0)
+        return buffer.getvalue()
+
+
     try:
         return _write_excel("openpyxl")
     except ModuleNotFoundError:
         try:
             return _write_excel("xlsxwriter")
-        except ModuleNotFoundError as fallback_exc:
-            raise RuntimeError(
-                "Excel dışa aktarma işlemi için 'openpyxl' veya 'XlsxWriter' paketlerinden"
-                " en az birinin kurulu olması gerekir."
-            ) from fallback_exc
+        except ModuleNotFoundError:
+            return _write_simple_xlsx()
 
 
 def _normalize_import_value(value, column: str):
