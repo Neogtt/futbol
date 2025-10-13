@@ -1098,7 +1098,7 @@ with st.sidebar:
     )
 
     st.markdown("#### 💾 Yerel Excel Senkronizasyonu")
-    local_excel_path = st.text_input(
+        local_excel_path = st.text_input(
         "Excel dosya yolu",
         value=st.session_state.get("local_excel_path", ""),
         help="Yerel diskteki Excel dosyasının tam yolunu girin.",
