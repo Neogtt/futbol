@@ -1203,22 +1203,7 @@ if import_feedback:
         sidebar.success(msg_text)
     else:
         sidebar.error(msg_text)
-
-with sidebar.form("excel_import_form"):
-    sidebar.caption("Excel içe aktarma mevcut verileri günceller. Lütfen önce yedek alın.")
-    
-    uploaded_excel = sidebar.file_uploader(
-        "Excel (.xlsx) seç", type=["xlsx"], key="excel_import_file"
-    )
-    import_submitted = st.form_submit_button("📥 Excel'den içe aktar")
-    if import_submitted:
-        if not uploaded_excel:
-            sidebar.warning("Lütfen içe aktarmak için bir Excel dosyası seçin.")
-        else:
-            success, messages = import_db_from_excel(uploaded_excel)
-            status = "success" if success else "error"
-            st.session_state["import_feedback"] = (status, messages)
-            st.rerun()            
+        
 
 sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
 sheet_id_input = st.session_state.get("google_sheet_id", "").strip()
@@ -1260,33 +1245,6 @@ if import_clicked:
     status = "success" if success else "error"
     st.session_state["import_feedback"] = (status, messages)
     st.rerun()
-
-sidebar.subheader("WhatsApp Ayarları")
-if WABA_PHONE_NUMBER_ID:
-    sidebar.caption(
-        "WABA Phone Number ID yapılandırıldı: `{}…{}`".format(
-            WABA_PHONE_NUMBER_ID[:4], WABA_PHONE_NUMBER_ID[-2:]
-        )
-    )
-else:
-    sidebar.warning("WABA Phone Number ID bulunamadı. Lütfen yapılandırmayı kontrol edin.")
-
-sidebar.caption(
-    "WhatsApp erişim anahtarı {}".format(
-        "tanımlı" if WHATSAPP_TOKEN else "bulunamadı"
-    )
-)
-sidebar.markdown(
-    """
-- İlk mesajlar **şablon** olmalı (24 saat kuralı).
-- Gruplara mesaj API ile **gönderilemez**; veli numaralarına toplu gönderim yapılır.
-- Numara formatı: **+90XXXXXXXXXX**
-    """
-)
-sidebar.markdown("---")
-if sidebar.button("Vade/Gecikme Durumlarını Güncelle"):
-    compute_status_rollover()
-    sidebar.success("Durumlar güncellendi.")
 
 # ---------------------------
 # UI — Tabs
