@@ -1221,24 +1221,31 @@ with sidebar.form("excel_import_form"):
             st.rerun()            
 
 sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
-sheet_id_input = sidebar.text_input(
-    "Google Sheet ID",
-    key="google_sheet_id",
-    help="Google Sheets URL'sinde bulunan kimliği girin.",
-)
-sidebar.caption(
-    "Service account JSON bilgilerini `st.secrets` veya ortam değişkenlerinde tanımlayın."
-)
+sheet_id_input = st.session_state.get("google_sheet_id", "").strip()
+if sheet_id_input:
+    masked_sheet_id = (
+        f"{sheet_id_input[:4]}…{sheet_id_input[-4:]}"
+        if len(sheet_id_input) > 8
+        else "●" * len(sheet_id_input)
+    )
+    sidebar.caption(
+        f"Google Sheets ID yapılandırıldı: `{masked_sheet_id}`\n"
+        "Service account JSON bilgilerini `st.secrets` veya ortam değişkenlerinde tanımlayın."
+    )
+else:
+    sidebar.warning(
+        "Google Sheets ID tanımlı değil. Lütfen `st.secrets` veya ortam değişkenlerinden sağlayın."
+    )
 col_gs_export, col_gs_import = sidebar.columns(2)
 export_clicked = col_gs_export.button(
     "📤 Sheets'e Yedekle",
     use_container_width=True,
-    disabled=not sheet_id_input.strip(),
+    disabled=not sheet_id_input,
 )
 import_clicked = col_gs_import.button(
     "📥 Sheets'ten İçe Aktar",
     use_container_width=True,
-    disabled=not sheet_id_input.strip(),
+    disabled=not sheet_id_input,
 )
 
 if export_clicked:
@@ -1255,11 +1262,19 @@ if import_clicked:
     st.rerun()
 
 sidebar.subheader("WhatsApp Ayarları")
-sidebar.text_input("WABA_PHONE_NUMBER_ID", value=WABA_PHONE_NUMBER_ID, disabled=True)
-sidebar.text_input(
-    "WHATSAPP_TOKEN (st.secrets)",
-    value=("●" * 10 if WHATSAPP_TOKEN else "—"),
-    disabled=True,
+if WABA_PHONE_NUMBER_ID:
+    sidebar.caption(
+        "WABA Phone Number ID yapılandırıldı: `{}…{}`".format(
+            WABA_PHONE_NUMBER_ID[:4], WABA_PHONE_NUMBER_ID[-2:]
+        )
+    )
+else:
+    sidebar.warning("WABA Phone Number ID bulunamadı. Lütfen yapılandırmayı kontrol edin.")
+
+sidebar.caption(
+    "WhatsApp erişim anahtarı {}".format(
+        "tanımlı" if WHATSAPP_TOKEN else "bulunamadı"
+    )
 )
 sidebar.markdown(
     """
