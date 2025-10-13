@@ -1097,7 +1097,7 @@ with st.sidebar:
         help="Tüm tablo verilerini Excel formatında indir.",
     )
 
-        st.markdown("#### 💾 Yerel Excel Senkronizasyonu")
+    st.markdown("#### 💾 Yerel Excel Senkronizasyonu")
     local_excel_path = st.text_input(
         "Excel dosya yolu",
         value=st.session_state.get("local_excel_path", ""),
