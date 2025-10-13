@@ -72,6 +72,7 @@ EXPECTED_IMPORT_COLUMNS: dict[str, list[str]] = {
         "veli_ad",
         "veli_tel",
         "takim",
+        "kayit_tarihi",        
         "dogum_tarihi",
         "aktif_mi",
         "uye_tipi",
@@ -130,6 +131,7 @@ def init_db():
         veli_ad TEXT,
         veli_tel TEXT,     -- +90 ile E.164 formatı önerilir
         takim TEXT,
+        kayit_tarihi TEXT, -- YYYY-MM-DD        
         dogum_tarihi TEXT, -- YYYY-MM-DD
         aktif_mi INTEGER DEFAULT 1,
         uye_tipi TEXT DEFAULT 'Aylık'
@@ -140,6 +142,8 @@ def init_db():
     columns = [row[1] for row in c.fetchall()]
     if "uye_tipi" not in columns:
         c.execute("ALTER TABLE students ADD COLUMN uye_tipi TEXT DEFAULT 'Aylık'")
+    if "kayit_tarihi" not in columns:
+        c.execute("ALTER TABLE students ADD COLUMN kayit_tarihi TEXT")        
     c.execute("""
         CREATE TABLE IF NOT EXISTS groups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -518,7 +522,7 @@ def _normalize_import_value(value, column: str):
             return float(value_str)
         except ValueError as exc:  # pragma: no cover - format guard
             raise ValueError(f"{column} sütunu için sayısal değer bekleniyor: {value}") from exc
-    if column in {"dogum_tarihi", "son_odeme_tarihi", "tarih"}:
+    if column in {"dogum_tarihi", "son_odeme_tarihi", "tarih", "kayit_tarihi"}:
         if isinstance(value, (datetime, date)):
             return value.isoformat()
         if isinstance(value, str):
@@ -997,15 +1001,38 @@ def upsert_student(row: dict, row_id: int | None):
     conn = get_conn()
     c = conn.cursor()
     if row_id:
-        c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=?
+        c.execute(
+            """UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, kayit_tarihi=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=?
                      WHERE id=?""",
-                 (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                  row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık"), row_id))
+            (
+                row["ad"],
+                row["soyad"],
+                row["veli_ad"],
+                row["veli_tel"],
+                row.get("takim", ""),
+                row.get("kayit_tarihi"),
+                row["dogum_tarihi"],
+                int(row.get("aktif_mi", 1)),
+                row.get("uye_tipi", "Aylık"),
+                row_id,
+            ),
+        )
     else:
-        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, dogum_tarihi, aktif_mi, uye_tipi)
-                     VALUES(?,?,?,?,?,?,?,?)""",
-                 (row["ad"], row["soyad"], row["veli_ad"], row["veli_tel"], row.get("takim", ""),
-                  row["dogum_tarihi"], int(row.get("aktif_mi",1)), row.get("uye_tipi", "Aylık")))
+        c.execute(
+            """INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi)
+                     VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                row["ad"],
+                row["soyad"],
+                row["veli_ad"],
+                row["veli_tel"],
+                row.get("takim", ""),
+                row.get("kayit_tarihi"),
+                row["dogum_tarihi"],
+                int(row.get("aktif_mi", 1)),
+                row.get("uye_tipi", "Aylık"),
+            ),
+        )
     conn.commit()
     conn.close()
 
@@ -1364,6 +1391,19 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
         takim_options = []
         takim_index = 0
 
+        default_kayit = date.today()
+    if selected_student:
+        kayit_val = selected_student.get("kayit_tarihi")
+        if isinstance(kayit_val, pd.Timestamp):
+            default_kayit = kayit_val.date()
+        elif isinstance(kayit_val, date):
+            default_kayit = kayit_val
+        elif isinstance(kayit_val, str) and kayit_val:
+            try:
+                default_kayit = date.fromisoformat(kayit_val)
+            except ValueError:
+                pass
+
     default_dogum = date(2015, 1, 1)
     if selected_student:
         dogum_val = selected_student.get("dogum_tarihi")
@@ -1398,6 +1438,7 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
         st.session_state[f"student_form_veli_tel_{key_suffix}"] = veli_tel_default
         st.session_state[f"student_form_takim_{key_suffix}"] = takim_default
         st.session_state[f"student_form_takim_text_{key_suffix}"] = takim_default
+        st.session_state[f"student_form_kayit_{key_suffix}"] = default_kayit        
         st.session_state[f"student_form_dogum_{key_suffix}"] = default_dogum
         st.session_state[f"student_form_aktif_{key_suffix}"] = aktif_default
         st.session_state[f"student_form_uye_tipi_{key_suffix}"] = uye_default
@@ -1431,6 +1472,12 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
                 key=f"student_form_takim_text_{key_suffix}",
             )
 
+        kayit = st.date_input(
+            "Kayıt Tarihi",
+            value=default_kayit,
+            key=f"student_form_kayit_{key_suffix}",
+        )
+        
         dogum = st.date_input(
             "Doğum Tarihi",
             value=default_dogum,
@@ -1484,7 +1531,8 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
             payload = {
                 "ad": ad.strip(), "soyad": soyad.strip(),
                 "veli_ad": veli_ad.strip(), "veli_tel": veli_tel.strip(),
-                "takim": takim.strip(), "dogum_tarihi": dogum.isoformat(),
+                "takim": takim.strip(), "kayit_tarihi": kayit.isoformat(),
+                "dogum_tarihi": dogum.isoformat(),
                 "uye_tipi": uye_tipi,
                 "aktif_mi": 1 if aktif else 0
             }
