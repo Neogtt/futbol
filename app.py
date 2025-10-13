@@ -93,6 +93,10 @@ if "DB_PATH" not in st.session_state:
 if "google_sheet_id" not in st.session_state:
     st.session_state.google_sheet_id = DEFAULT_GOOGLE_SHEET_ID
 
+if "local_excel_path" not in st.session_state:
+    default_local_excel = os.path.abspath("futbol_okulu.xlsx")
+    st.session_state.local_excel_path = default_local_excel
+
 # ---------------------------
 # DB Helpers
 # ---------------------------
@@ -661,6 +665,20 @@ def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
         return False, [f"Excel dosyası okunamadı: {exc}"]
 
     return import_db_from_frames(sheets)
+    
+def import_db_from_excel_path(path: str) -> tuple[bool, list[str]]:
+    path = (path or "").strip()
+    if not path:
+        return False, ["Excel dosya yolu boş olamaz."]
+    if not os.path.exists(path):
+        return False, [f"Excel dosyası bulunamadı: {path}"]
+    try:
+        sheets = _read_excel_workbook(path)
+    except Exception as exc:  # pragma: no cover - kullanıcı girdisi
+        return False, [f"Excel dosyası okunamadı: {exc}"]
+    return import_db_from_frames(sheets)
+
+
 
 def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
     """İçe aktarma işlemi; başarı durumunu ve mesajları döner."""
@@ -783,6 +801,24 @@ def export_db_to_google_sheet(sheet_id: str) -> tuple[bool, str]:
             return False, f"{table} sayfası yazılamadı: {exc}"
 
     return True, "Veritabanı Google Sheets'e aktarıldı."
+
+
+def export_db_to_excel_file(path: str) -> tuple[bool, str]:
+    path = (path or "").strip()
+    if not path:
+        return False, "Excel dosya yolu boş olamaz."
+    directory = os.path.dirname(path)
+    if directory and not os.path.exists(directory):
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:  # pragma: no cover - dosya sistemi
+            return False, f"Klasör oluşturulamadı: {exc}"
+    try:
+        with open(path, "wb") as fh:
+            fh.write(export_db_to_excel_bytes())
+    except OSError as exc:  # pragma: no cover - dosya sistemi
+        return False, f"Excel dosyası yazılamadı: {exc}"
+    return True, f"Veritabanı `{path}` dosyasına kaydedildi."
 
 
 # ---------------------------
@@ -1051,6 +1087,27 @@ with st.sidebar:
         help="Tüm tablo verilerini Excel formatında indir.",
     )
 
+        st.markdown("#### 💾 Yerel Excel Senkronizasyonu")
+    local_excel_path = st.text_input(
+        "Excel dosya yolu",
+        value=st.session_state.get("local_excel_path", ""),
+        help="Yerel diskteki Excel dosyasının tam yolunu girin.",
+    )
+    st.session_state.local_excel_path = local_excel_path
+    col_local_export, col_local_import = st.columns(2)
+    if col_local_export.button("📤 Dosyaya Kaydet", use_container_width=True):
+        success, message = export_db_to_excel_file(local_excel_path)
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+    if col_local_import.button("📥 Dosyadan Al", use_container_width=True):
+        success, messages = import_db_from_excel_path(local_excel_path)
+        status = "success" if success else "error"
+        st.session_state["import_feedback"] = (status, messages)
+        st.rerun()
+
+    
     import_feedback = st.session_state.pop("import_feedback", None)
     if import_feedback:
         status, messages = import_feedback
