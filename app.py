@@ -484,7 +484,7 @@ def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
 
     return import_db_from_frames(sheets)
 
-    def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
+def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
     """İçe aktarma işlemi; başarı durumunu ve mesajları döner."""
 
     processed: list[str] = []
