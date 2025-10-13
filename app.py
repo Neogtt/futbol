@@ -1163,7 +1163,9 @@ sidebar = st.sidebar
 sidebar.title("⚽ Futbol Okulu")
 sidebar.caption("Ödeme Takip + WhatsApp")
 sidebar.markdown("---")
-sidebar.warning(_db_persistence_note())
+with sidebar.expander("ℹ️ Veri Depolama Bilgisi", expanded=False):
+    sidebar.info(_db_persistence_note())
+
 sidebar.markdown("### 📋 Menü")
 MENU_OPTIONS = [
     "📊 Pano",
