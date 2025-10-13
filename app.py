@@ -1391,7 +1391,7 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
         takim_options = []
         takim_index = 0
 
-        default_kayit = date.today()
+    default_kayit = date.today()
     if selected_student:
         kayit_val = selected_student.get("kayit_tarihi")
         if isinstance(kayit_val, pd.Timestamp):
