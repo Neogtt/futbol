@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os, time, sqlite3, requests, io, zipfile, json
+import os, time, sqlite3, requests, io, zipfile, json, re
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, TYPE_CHECKING
 from xml.sax.saxutils import escape
 import numbers
 import streamlit as st
 import pandas as pd
+from xml.etree import ElementTree as ET
 
 try:
     from google.oauth2.service_account import Credentials as GoogleCredentials
@@ -506,12 +507,156 @@ def _normalize_import_value(value, column: str):
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     return value
+    
+def _reset_stream_position(handle: Any) -> None:
+    if hasattr(handle, "seek"):
+        try:
+            handle.seek(0)
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+
+def _coerce_to_buffer(data_source: Any) -> io.BytesIO:
+    if isinstance(data_source, (str, os.PathLike)):
+        with open(data_source, "rb") as fh:
+            return io.BytesIO(fh.read())
+    if isinstance(data_source, bytes):
+        return io.BytesIO(data_source)
+    getvalue = getattr(data_source, "getvalue", None)
+    if callable(getvalue):
+        try:
+            return io.BytesIO(getvalue())
+        except TypeError:  # pragma: no cover - stream may not support getvalue
+            pass
+    read = getattr(data_source, "read", None)
+    if callable(read):
+        content = read()
+        _reset_stream_position(data_source)
+        return io.BytesIO(content)
+    raise TypeError("Desteklenmeyen veri kaynağı")
+
+
+def _column_index(column_ref: str) -> int:
+    result = 0
+    for char in column_ref.upper():
+        if not ("A" <= char <= "Z"):
+            continue
+        result = result * 26 + (ord(char) - 64)
+    return max(result, 1)
+
+
+def _parse_cell_value(cell: ET.Element, namespaces: dict[str, str]) -> Any:
+    cell_type = cell.attrib.get("t")
+    value_element = cell.find("main:v", namespaces)
+    if cell_type == "inlineStr":
+        inline = cell.find("main:is", namespaces)
+        text_element = inline.find("main:t", namespaces) if inline is not None else None
+        if text_element is None:
+            return None
+        return text_element.text or ""
+    if cell_type == "b":
+        raw = value_element.text if value_element is not None else "0"
+        try:
+            return bool(int(str(raw or "0")))
+        except ValueError:  # pragma: no cover - bozuk veri
+            return False
+    if value_element is None or (value_element.text or "").strip() == "":
+        return None
+    raw_text = value_element.text or ""
+    try:
+        as_float = float(raw_text)
+        if as_float.is_integer():
+            return int(as_float)
+        return as_float
+    except ValueError:
+        return raw_text
+
+
+def _read_simple_xlsx(data_source: Any) -> dict[str, pd.DataFrame]:
+    buffer = _coerce_to_buffer(data_source)
+    result: dict[str, pd.DataFrame] = {}
+    with zipfile.ZipFile(buffer) as zf:
+        workbook_xml = zf.read("xl/workbook.xml")
+        workbook_tree = ET.fromstring(workbook_xml)
+        namespaces = {
+            "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        }
+        rel_tree = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+        rel_ns = {
+            "rel": "http://schemas.openxmlformats.org/package/2006/relationships"
+        }
+        relationships = {
+            rel.attrib["Id"]: rel.attrib["Target"]
+            for rel in rel_tree.findall("rel:Relationship", rel_ns)
+        }
+
+        for sheet in workbook_tree.findall("main:sheets/main:sheet", namespaces):
+            sheet_name = sheet.attrib.get("name", "Sheet")
+            rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            if not rel_id:
+                continue
+            target = relationships.get(rel_id)
+            if not target:
+                continue
+            target_path = target.lstrip("/")
+            if not target_path.startswith("xl/"):
+                target_path = f"xl/{target_path}"
+            sheet_xml = ET.fromstring(zf.read(target_path))
+            rows: list[list[Any]] = []
+            for row in sheet_xml.findall("main:sheetData/main:row", namespaces):
+                row_values: list[Any] = []
+                current_col = 1
+                for cell in row.findall("main:c", namespaces):
+                    ref = cell.attrib.get("r", "")
+                    match = re.match(r"([A-Za-z]+)", ref)
+                    if match:
+                        col_index = _column_index(match.group(1))
+                    else:
+                        col_index = current_col
+                    while current_col < col_index:
+                        row_values.append(None)
+                        current_col += 1
+                    row_values.append(_parse_cell_value(cell, namespaces))
+                    current_col += 1
+                rows.append(row_values)
+            if not rows:
+                result[sheet_name] = pd.DataFrame()
+                continue
+            max_columns = max((len(r) for r in rows), default=0)
+            for r in rows:
+                if len(r) < max_columns:
+                    r.extend([None] * (max_columns - len(r)))
+            header = [str(col).strip() if col is not None else "" for col in rows[0]]
+            data_rows = []
+            for row in rows[1:]:
+                row = list(row[: len(header)])
+                if len(row) < len(header):
+                    row.extend([None] * (len(header) - len(row)))
+                if any(cell not in (None, "") for cell in row):
+                    data_rows.append(row)
+            result[sheet_name] = pd.DataFrame(data_rows, columns=header)
+    return result
+
+
+def _read_excel_workbook(uploaded_file: Any) -> dict[str, pd.DataFrame]:
+    try:
+        _reset_stream_position(uploaded_file)
+        return pd.read_excel(uploaded_file, sheet_name=None)
+    except (ModuleNotFoundError, ImportError) as exc:
+        message = str(exc)
+        if "openpyxl" not in message:
+            raise
+        _reset_stream_position(uploaded_file)
+        return _read_simple_xlsx(uploaded_file)
+
+
 
 
 def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
     """İçe aktarma işlemi; başarı durumunu ve mesajları döner."""
     try:
-        sheets = pd.read_excel(uploaded_file, sheet_name=None)
+        sheets = _read_excel_workbook(uploaded_file)
     except Exception as exc:  # pragma: no cover - kullanıcı girdisi
         return False, [f"Excel dosyası okunamadı: {exc}"]
 
