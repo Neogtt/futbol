@@ -1080,113 +1080,117 @@ def _db_persistence_note() -> str:
     )
 
 
-with st.sidebar:
-    st.title("⚽ Futbol Okulu")
-    st.caption("Ödeme Takip + WhatsApp")
-    st.markdown("---")
-    st.warning(_db_persistence_note())
+sidebar = st.sidebar
+sidebar.title("⚽ Futbol Okulu")
+sidebar.caption("Ödeme Takip + WhatsApp")
+sidebar.markdown("---")
+sidebar.warning(_db_persistence_note())
 
-
-    excel_bytes = export_db_to_excel_bytes()
-    st.markdown("### 📁 Excel Yedekleme / Aktarma")
-    st.download_button(
-        "📤 Excel olarak dışa aktar",
-        data=excel_bytes,
-        file_name=f"futbol_okulu_{date.today().isoformat()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Tüm tablo verilerini Excel formatında indir.",
-    )
-
-    st.markdown("#### 💾 Yerel Excel Senkronizasyonu")
-    local_excel_path = st.text_input(
-        "Excel dosya yolu",
-        value=st.session_state.get("local_excel_path", ""),
-        help="Yerel diskteki Excel dosyasının tam yolunu girin.",
-    )
-    st.session_state.local_excel_path = local_excel_path
-    col_local_export, col_local_import = st.columns(2)
-    if col_local_export.button("📤 Dosyaya Kaydet", use_container_width=True):
-        success, message = export_db_to_excel_file(local_excel_path)
-        if success:
-            st.success(message)
-        else:
-            st.error(message)
-    if col_local_import.button("📥 Dosyadan Al", use_container_width=True):
-        success, messages = import_db_from_excel_path(local_excel_path)
-        status = "success" if success else "error"
-        st.session_state["import_feedback"] = (status, messages)
-        st.rerun()
-
+excel_bytes = export_db_to_excel_bytes()
+sidebar.markdown("### 📁 Excel Yedekleme / Aktarma")
+sidebar.download_button(
+    "📤 Excel olarak dışa aktar",
+    data=excel_bytes,
+    file_name=f"futbol_okulu_{date.today().isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Tüm tablo verilerini Excel formatında indir.",
+)
     
-    import_feedback = st.session_state.pop("import_feedback", None)
-    if import_feedback:
-        status, messages = import_feedback
-        msg_text = "\n".join(messages)
-        if status == "success":
-            st.success(msg_text)
+sidebar.markdown("#### 💾 Yerel Excel Senkronizasyonu")
+local_excel_path = sidebar.text_input(
+    "Excel dosya yolu",
+    value=st.session_state.get("local_excel_path", ""),
+    help="Yerel diskteki Excel dosyasının tam yolunu girin.",
+)
+st.session_state.local_excel_path = local_excel_path
+col_local_export, col_local_import = sidebar.columns(2)
+if col_local_export.button("📤 Dosyaya Kaydet", use_container_width=True):
+    success, message = export_db_to_excel_file(local_excel_path)
+    if success:
+        sidebar.success(message)
+    else:
+        sidebar.error(message)
+if col_local_import.button("📥 Dosyadan Al", use_container_width=True):
+    success, messages = import_db_from_excel_path(local_excel_path)
+    status = "success" if success else "error"
+    st.session_state["import_feedback"] = (status, messages)
+    st.rerun()
+
+import_feedback = st.session_state.pop("import_feedback", None)
+if import_feedback:
+    status, messages = import_feedback
+    msg_text = "\n".join(messages)
+    if status == "success":
+        sidebar.success(msg_text)
+    else:
+        sidebar.error(msg_text)
+
+with sidebar.form("excel_import_form"):
+    sidebar.caption("Excel içe aktarma mevcut verileri günceller. Lütfen önce yedek alın.")
+    uploaded_excel = sidebar.file_uploader(
+        "Excel (.xlsx) seç", type=["xlsx"], key="excel_import_file"
+    )
+    import_submitted = sidebar.form_submit_button("📥 Excel'den içe aktar")
+    if import_submitted:
+        if not uploaded_excel:
+            sidebar.warning("Lütfen içe aktarmak için bir Excel dosyası seçin.")
         else:
-            st.error(msg_text)
+            success, messages = import_db_from_excel(uploaded_excel)
+            status = "success" if success else "error"
+            st.session_state["import_feedback"] = (status, messages)
 
-    with st.form("excel_import_form"):
-        st.caption("Excel içe aktarma mevcut verileri günceller. Lütfen önce yedek alın.")
-        uploaded_excel = st.file_uploader("Excel (.xlsx) seç", type=["xlsx"], key="excel_import_file")
-        import_submitted = st.form_submit_button("📥 Excel'den içe aktar")
-        if import_submitted:
-            if not uploaded_excel:
-                st.warning("Lütfen içe aktarmak için bir Excel dosyası seçin.")
-            else:
-                success, messages = import_db_from_excel(uploaded_excel)
-                status = "success" if success else "error"
-                st.session_state["import_feedback"] = (status, messages)
-                st.rerun()
+sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
+sheet_id_input = sidebar.text_input(
+    "Google Sheet ID",
+    key="google_sheet_id",
+    help="Google Sheets URL'sinde bulunan kimliği girin.",
+)
+sidebar.caption(
+    "Service account JSON bilgilerini `st.secrets` veya ortam değişkenlerinde tanımlayın."
+)
+col_gs_export, col_gs_import = sidebar.columns(2)
+export_clicked = col_gs_export.button(
+    "📤 Sheets'e Yedekle",
+    use_container_width=True,
+    disabled=not sheet_id_input.strip(),
+)
+import_clicked = col_gs_import.button(
+    "📥 Sheets'ten İçe Aktar",
+    use_container_width=True,
+    disabled=not sheet_id_input.strip(),
+)
 
-    st.markdown("### ☁️ Google Sheets Senkronizasyonu")
-    sheet_id_input = st.text_input(
-        "Google Sheet ID",
-        key="google_sheet_id",
-        help="Google Sheets URL'sinde bulunan kimliği girin.",
-    )
-    st.caption(
-        "Service account JSON bilgilerini `st.secrets` veya ortam değişkenlerinde tanımlayın."
-    )
-    col_gs_export, col_gs_import = st.columns(2)
-    export_clicked = col_gs_export.button(
-        "📤 Sheets'e Yedekle",
-        use_container_width=True,
-        disabled=not sheet_id_input.strip(),
-    )
-    import_clicked = col_gs_import.button(
-        "📥 Sheets'ten İçe Aktar",
-        use_container_width=True,
-        disabled=not sheet_id_input.strip(),
-    )
+if export_clicked:
+    success, message = export_db_to_google_sheet(sheet_id_input)
+    if success:
+        sidebar.success(message)
+    else:
+        sidebar.error(message)
 
-    if export_clicked:
-        success, message = export_db_to_google_sheet(sheet_id_input)
-        if success:
-            st.success(message)
-        else:
-            st.error(message)
+if import_clicked:
+    success, messages = import_db_from_google_sheet(sheet_id_input)
+    status = "success" if success else "error"
+    st.session_state["import_feedback"] = (status, messages)
+    st.rerun()
 
-    if import_clicked:
-        success, messages = import_db_from_google_sheet(sheet_id_input)
-        status = "success" if success else "error"
-        st.session_state["import_feedback"] = (status, messages)
-        st.rerun()                
-    
-    
-    st.subheader("WhatsApp Ayarları")
-    st.text_input("WABA_PHONE_NUMBER_ID", value=WABA_PHONE_NUMBER_ID, disabled=True)
-    st.text_input("WHATSAPP_TOKEN (st.secrets)", value=("●"*10 if WHATSAPP_TOKEN else "—"), disabled=True)
-    st.markdown("""
+sidebar.subheader("WhatsApp Ayarları")
+sidebar.text_input("WABA_PHONE_NUMBER_ID", value=WABA_PHONE_NUMBER_ID, disabled=True)
+sidebar.text_input(
+    "WHATSAPP_TOKEN (st.secrets)",
+    value=("●" * 10 if WHATSAPP_TOKEN else "—"),
+    disabled=True,
+)
+sidebar.markdown(
+    """
 - İlk mesajlar **şablon** olmalı (24 saat kuralı).
 - Gruplara mesaj API ile **gönderilemez**; veli numaralarına toplu gönderim yapılır.
 - Numara formatı: **+90XXXXXXXXXX**
-    """)
-    st.markdown("---")
-    if st.button("Vade/Gecikme Durumlarını Güncelle"):
-        compute_status_rollover()
-        st.success("Durumlar güncellendi.")
+    """
+)
+sidebar.markdown("---")
+if sidebar.button("Vade/Gecikme Durumlarını Güncelle"):
+    compute_status_rollover()
+    sidebar.success("Durumlar güncellendi.")
 
 # ---------------------------
 # UI — Tabs
