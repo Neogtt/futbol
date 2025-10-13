@@ -1164,6 +1164,21 @@ sidebar.title("⚽ Futbol Okulu")
 sidebar.caption("Ödeme Takip + WhatsApp")
 sidebar.markdown("---")
 sidebar.warning(_db_persistence_note())
+sidebar.markdown("### 📋 Menü")
+MENU_OPTIONS = [
+    "📊 Pano",
+    "👨‍👩‍👧‍👦 Öğrenciler",
+    "🧾 Faturalar",
+    "📲 WhatsApp Gönder",
+    "🧾 Log",
+    "🎉 Özel Günler",
+]
+selected_menu = sidebar.radio(
+    "Sayfayı seçin",
+    options=MENU_OPTIONS,
+    index=0,
+    key="navigation_menu",
+)
 
 excel_bytes = export_db_to_excel_bytes()
 sidebar.markdown("### 📁 Excel Yedekleme / Aktarma")
@@ -1247,14 +1262,10 @@ if import_clicked:
     st.rerun()
 
 # ---------------------------
-# UI — Tabs
+# UI — Sections
 # ---------------------------
-tab_dash, tab_students, tab_invoices, tab_whatsapp, tab_logs, tab_special = st.tabs(
-    ["📊 Pano", "👨‍👩‍👧‍👦 Öğrenciler", "🧾 Faturalar", "📲 WhatsApp Gönder", "🧾 Log", "🎉 Özel Günler"]
-)
 
-# ---- Dashboard
-with tab_dash:
+if selected_menu == "📊 Pano":    
     st.header("📊 Pano")
     df_inv = df_invoices()
     today = date.today()
@@ -1275,8 +1286,7 @@ with tab_dash:
     st.subheader("Gecikenler")
     st.dataframe(overdue, use_container_width=True)
 
-# ---- Students
-with tab_students:
+elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
     st.header("👨‍👩‍👧‍👦 Öğrenciler")
 
 
@@ -1430,9 +1440,8 @@ with tab_students:
             st.rerun()
         if submitted and pending_key in st.session_state:
             st.session_state.pop(pending_key, None)
-                    
-# ---- Invoices
-with tab_invoices:
+
+elif selected_menu == "🧾 Faturalar":
     st.header("🧾 Faturalar")
     invoice_success = st.session_state.pop("invoice_success", None)
     if invoice_success:
@@ -1471,12 +1480,11 @@ with tab_invoices:
         st.session_state["payment_success"] = "Fatura ödendi olarak işaretlendi. Liste yenilendi."
         st.rerun()
 
-# ---- WhatsApp Send
-with tab_whatsapp:
+elif selected_menu == "📲 WhatsApp Gönder":
     st.header("📲 WhatsApp Gönder")
 
     df = df_invoices()
-    overdue = df[(df["durum"] == "gecikti") & df["veli_tel"].notna()].copy()    
+    overdue = df[(df["durum"] == "gecikti") & df["veli_tel"].notna()].copy()
     if overdue.empty:
         st.info("Vadesi geçen aidat bulunmuyor.")
         st.session_state.whatsapp_overdue_selected = set()
@@ -1508,7 +1516,7 @@ with tab_whatsapp:
             "tutar",
             "son_odeme_tarihi",
             "veli_tel",
-]].copy()
+        ]].copy()
         display_df.rename(
             columns={
                 "id": "Fatura ID",
@@ -1590,16 +1598,14 @@ with tab_whatsapp:
                 if error_msgs:
                     st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
 
-# ---- Logs
-with tab_logs:
+elif selected_menu == "🧾 Log":
     st.header("🧾 Mesaj Kayıtları")
     conn = get_conn()
     df_log = pd.read_sql_query("SELECT * FROM msg_log ORDER BY id DESC LIMIT 500", conn)
     conn.close()
     st.dataframe(df_log, use_container_width=True)
 
-# ---- Special Days
-with tab_special:
+elif selected_menu == "🎉 Özel Günler":
     st.header("🎉 Özel Gün Mesajları")
     st.caption("Doğum günü ve resmi/kurumsal günler için hızlı gönderim.")
     # Doğum günü bugün olanlar:
@@ -1630,10 +1636,10 @@ with tab_special:
         else:
             if not bday_phones:
                 st.error("Gönderilecek veli telefonu bulunamadı.")
-                st.stop()            
+                st.stop()
             sent = failed = 0
             error_msgs: List[str] = []
-            for p in bday_phones:            
+            for p in bday_phones:      
                 if not p:
                     continue
                 resp = send_text(p, bmsg)
@@ -1647,4 +1653,4 @@ with tab_special:
                 time.sleep(1)
             st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
             if error_msgs:
-                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))            
+                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
