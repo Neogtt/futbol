@@ -1131,7 +1131,7 @@ with sidebar.form("excel_import_form"):
     uploaded_excel = sidebar.file_uploader(
         "Excel (.xlsx) seç", type=["xlsx"], key="excel_import_file"
     )
-    import_submitted = sidebar.form_submit_button("📥 Excel'den içe aktar")
+    import_submitted = st.form_submit_button("📥 Excel'den içe aktar")
     if import_submitted:
         if not uploaded_excel:
             sidebar.warning("Lütfen içe aktarmak için bir Excel dosyası seçin.")
@@ -1139,6 +1139,7 @@ with sidebar.form("excel_import_form"):
             success, messages = import_db_from_excel(uploaded_excel)
             status = "success" if success else "error"
             st.session_state["import_feedback"] = (status, messages)
+            st.rerun()            
 
 sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
 sheet_id_input = sidebar.text_input(
