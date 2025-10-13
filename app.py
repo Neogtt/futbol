@@ -6,8 +6,18 @@ from typing import List, Dict, Any, TYPE_CHECKING
 from xml.sax.saxutils import escape
 import numbers
 import streamlit as st
+
+try:
+    from streamlit.runtime.secrets import StreamlitSecretNotFoundError
+except Exception:  # pragma: no cover - optional dependency
+    class StreamlitSecretNotFoundError(Exception):
+        """Fallback when Streamlit's secret error type isn't available."""
+
+        pass
 import pandas as pd
 from xml.etree import ElementTree as ET
+
+
 
 try:
     from google.oauth2.service_account import Credentials as GoogleCredentials
@@ -39,7 +49,7 @@ st.set_page_config(page_title="Futbol Okulu • Tahsilat & WhatsApp", layout="wi
 def _get_secret(name: str, default: str = "") -> str:
     try:
         return st.secrets[name]
-    except (KeyError, FileNotFoundError):
+    except (KeyError, FileNotFoundError, StreamlitSecretNotFoundError):
         return os.getenv(name, default)
 
 
