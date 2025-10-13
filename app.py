@@ -7,7 +7,11 @@ from xml.sax.saxutils import escape
 import numbers
 import streamlit as st
 import pandas as pd
-from oauth2client.service_account import ServiceAccountCredentials
+
+try:
+    from google.oauth2.service_account import Credentials as GoogleCredentials
+except ImportError:  # pragma: no cover - optional dependency
+    GoogleCredentials = None  # type: ignore[assignment]
 
 try:
     import gspread
@@ -224,7 +228,13 @@ def _get_gspread_client() -> tuple[gspread.Client | None, str | None]:
         return None, (
             "Google Sheets entegrasyonu için gspread paketi yüklenmemiş. "
             "requirements.txt dosyasına uygun şekilde kurulumu yapın."
-        )    
+        )
+    if GoogleCredentials is None:
+        return None, (
+            "Google Sheets entegrasyonu için google-auth paketi yüklenmemiş. "
+            "requirements.txt dosyasına uygun şekilde kurulumu yapın."
+        )
+
     info = _load_service_account_info()
     if not info:
         return None, (
@@ -232,7 +242,7 @@ def _get_gspread_client() -> tuple[gspread.Client | None, str | None]:
             "Streamlit secrets veya ortam değişkenlerinde kimlik bilgilerini tanımlayın."
         )
     try:
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(
+        credentials = GoogleCredentials.from_service_account_info(
             info,
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
