@@ -1058,6 +1058,85 @@ def compute_status_rollover():
     conn.commit()
     conn.close()
 
+
+def detect_data_integrity_issues(limit: int = 5) -> list[str]:
+    """Veritabanı kayıtları arasındaki ilişkileri doğrula ve sorunları listele."""
+
+    issues: list[str] = []
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+
+        # Öğrencisi olmayan faturalar
+        cursor.execute(
+            """
+            SELECT invoices.id, invoices.student_id
+            FROM invoices
+            LEFT JOIN students ON students.id = invoices.student_id
+            WHERE invoices.student_id IS NOT NULL AND students.id IS NULL
+            ORDER BY invoices.id ASC
+            """
+        )
+        orphan_invoices = cursor.fetchall()
+        if orphan_invoices:
+            sample = ", ".join(
+                f"#{row[0]} (öğrenci {row[1]})" for row in orphan_invoices[:limit]
+            )
+            if len(orphan_invoices) > limit:
+                sample += " …"
+            issues.append(
+                f"{len(orphan_invoices)} fatura kayıtlı olmayan öğrenciye bağlı: {sample}"
+            )
+
+        # Faturası olmayan ödemeler
+        cursor.execute(
+            """
+            SELECT payments.id, payments.invoice_id
+            FROM payments
+            LEFT JOIN invoices ON invoices.id = payments.invoice_id
+            WHERE payments.invoice_id IS NOT NULL AND invoices.id IS NULL
+            ORDER BY payments.id ASC
+            """
+        )
+        orphan_payments = cursor.fetchall()
+        if orphan_payments:
+            sample = ", ".join(
+                f"#{row[0]} (fatura {row[1]})" for row in orphan_payments[:limit]
+            )
+            if len(orphan_payments) > limit:
+                sample += " …"
+            issues.append(
+                f"{len(orphan_payments)} ödeme var ama ilişkili fatura bulunamadı: {sample}"
+            )
+
+        # Aynı öğrenci ve dönem için birden fazla fatura
+        cursor.execute(
+            """
+            SELECT student_id, donem, COUNT(*)
+            FROM invoices
+            WHERE student_id IS NOT NULL AND donem IS NOT NULL AND TRIM(donem) <> ''
+            GROUP BY student_id, donem
+            HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC
+            """
+        )
+        duplicate_invoices = cursor.fetchall()
+        if duplicate_invoices:
+            sample = ", ".join(
+                f"öğrenci {row[0]} • dönem {row[1]} ({row[2]} adet)"
+                for row in duplicate_invoices[:limit]
+            )
+            if len(duplicate_invoices) > limit:
+                sample += " …"
+            issues.append(
+                "Aynı öğrenci ve dönem için birden fazla fatura var: " + sample
+            )
+
+    finally:
+        conn.close()
+
+    return issues
+
 # ---------------------------
 # UI — Sidebar
 # ---------------------------
