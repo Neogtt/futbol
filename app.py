@@ -1,10 +1,12 @@
-import os, time, sqlite3, requests, io, zipfile
+import os, time, sqlite3, requests, io, zipfile, json
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any
 from xml.sax.saxutils import escape
 import numbers
 import streamlit as st
 import pandas as pd
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ---------------------------
 # Config & Secrets
@@ -23,9 +25,50 @@ WABA_PHONE_NUMBER_ID = _get_secret("WABA_PHONE_NUMBER_ID")  # e.g. "1234567890"
 GRAPH_BASE = "https://graph.facebook.com/v20.0"
 
 DEFAULT_DB_PATH = "futbol_okulu.db"
+DEFAULT_GOOGLE_SHEET_ID = _get_secret("GOOGLE_SHEET_ID", "")
+if not DEFAULT_GOOGLE_SHEET_ID:
+    DEFAULT_GOOGLE_SHEET_ID = "17-vOIoebsR7W7Bp83tbKZ7QOoC3oeUJ8"
+
+TABLE_NAMES = ["students", "groups", "invoices", "payments", "msg_log"]
+
+EXPECTED_IMPORT_COLUMNS: dict[str, list[str]] = {
+    "students": [
+        "id",
+        "ad",
+        "soyad",
+        "veli_ad",
+        "veli_tel",
+        "takim",
+        "dogum_tarihi",
+        "aktif_mi",
+        "uye_tipi",
+    ],
+    "groups": ["id", "ad"],
+    "invoices": [
+        "id",
+        "student_id",
+        "donem",
+        "tutar",
+        "son_odeme_tarihi",
+        "durum",
+    ],
+    "payments": ["id", "invoice_id", "tarih", "tutar", "aciklama"],
+    "msg_log": [
+        "id",
+        "phone",
+        "template_name",
+        "msg_type",
+        "payload",
+        "status",
+        "ts",
+    ],
+}
 
 if "DB_PATH" not in st.session_state:
     st.session_state.DB_PATH = DEFAULT_DB_PATH
+
+if "google_sheet_id" not in st.session_state:
+    st.session_state.google_sheet_id = DEFAULT_GOOGLE_SHEET_ID
 
 # ---------------------------
 # DB Helpers
@@ -102,18 +145,86 @@ init_db()
 # ---------------------------
 
 
-def export_db_to_excel_bytes() -> bytes:
-    """Return the entire veritabanı as an Excel workbook (bytes)."""
+def fetch_db_tables() -> dict[str, pd.DataFrame]:
     conn = get_conn()
-    sheets: dict[str, pd.DataFrame] = {}
+    tables: dict[str, pd.DataFrame] = {}
     try:
-        for table in ["students", "groups", "invoices", "payments", "msg_log"]:
+        for table in TABLE_NAMES:
             try:
-                sheets[table] = pd.read_sql_query(f"SELECT * FROM {table}", conn)
+                tables[table] = pd.read_sql_query(f"SELECT * FROM {table}", conn)
             except Exception:
-                sheets[table] = pd.DataFrame()
+                tables[table] = pd.DataFrame()
     finally:
         conn.close()
+    return tables
+
+
+def _df_to_gspread_values(df: pd.DataFrame) -> list[list[Any]]:
+    values: list[list[Any]] = []
+    headers = [str(col) for col in df.columns]
+    if headers:
+        values.append(headers)
+    for record in df.itertuples(index=False, name=None):
+        row_values: list[Any] = []
+        for value in record:
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                row_values.append("")
+            else:
+                row_values.append(value)
+        values.append(row_values)
+    return values
+
+
+def _load_service_account_info() -> dict[str, Any] | None:
+    candidate_keys = [
+        "gcp_service_account",
+        "service_account",
+        "google_service_account",
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+    ]
+    for key in candidate_keys:
+        try:
+            secret_value = st.secrets[key]
+            if isinstance(secret_value, dict):
+                return secret_value
+            if isinstance(secret_value, str) and secret_value.strip():
+                return json.loads(secret_value)
+        except (KeyError, FileNotFoundError):
+            pass
+        env_value = os.getenv(key)
+        if env_value and env_value.strip():
+            try:
+                return json.loads(env_value)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _get_gspread_client() -> tuple[gspread.Client | None, str | None]:
+    info = _load_service_account_info()
+    if not info:
+        return None, (
+            "Google service account bilgisi bulunamadı. "
+            "Streamlit secrets veya ortam değişkenlerinde kimlik bilgilerini tanımlayın."
+        )
+    try:
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(
+            info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.file",
+            ],
+        )
+        client = gspread.authorize(credentials)
+        return client, None
+    except Exception as exc:  # pragma: no cover - harici servis
+        return None, f"Google yetkilendirme hatası: {exc}"
+
+
+def export_db_to_excel_bytes() -> bytes:
+    """Return the entire veritabanı as an Excel workbook (bytes)."""
+    sheets = fetch_db_tables()        
 
     def _write_excel(engine: str) -> bytes:
         buffer = io.BytesIO()
@@ -328,6 +439,12 @@ def export_db_to_excel_bytes() -> bytes:
 
 
 def _normalize_import_value(value, column: str):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None    
     if pd.isna(value):
         return None
     if column in {"id", "student_id", "invoice_id", "aktif_mi"}:
@@ -365,37 +482,17 @@ def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
     except Exception as exc:  # pragma: no cover - kullanıcı girdisi
         return False, [f"Excel dosyası okunamadı: {exc}"]
 
-    expected_columns = {
-        "students": [
-            "id",
-            "ad",
-            "soyad",
-            "veli_ad",
-            "veli_tel",
-            "takim",
-            "dogum_tarihi",
-            "aktif_mi",
-            "uye_tipi",
-        ],
-        "groups": ["id", "ad"],
-        "invoices": [
-            "id",
-            "student_id",
-            "donem",
-            "tutar",
-            "son_odeme_tarihi",
-            "durum",
-        ],
-        "payments": ["id", "invoice_id", "tarih", "tutar", "aciklama"],
-        "msg_log": ["id", "phone", "template_name", "msg_type", "payload", "status", "ts"],
-    }
+    return import_db_from_frames(sheets)
+
+    def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
+    """İçe aktarma işlemi; başarı durumunu ve mesajları döner."""
 
     processed: list[str] = []
     conn = get_conn()
     cursor = conn.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=OFF")
-        for table, columns in expected_columns.items():
+        for table, columns in EXPECTED_IMPORT_COLUMNS.items():
             df = sheets.get(table)
             if df is None:
                 continue
@@ -436,6 +533,78 @@ def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
         conn.close()
 
     return True, processed if processed else ["Excel dosyasında beklenen sayfalar bulunamadı"]
+
+
+def import_db_from_google_sheet(sheet_id: str) -> tuple[bool, list[str]]:
+    sheet_id = (sheet_id or "").strip()
+    if not sheet_id:
+        return False, ["Google Sheet ID boş olamaz."]
+    client, error = _get_gspread_client()
+    if error:
+        return False, [error]
+    try:
+        spreadsheet = client.open_by_key(sheet_id)
+    except Exception as exc:  # pragma: no cover - harici servis
+        return False, [f"Google Sheet açılamadı: {exc}"]
+
+    sheets: dict[str, pd.DataFrame] = {}
+    for table in TABLE_NAMES:
+        try:
+            worksheet = spreadsheet.worksheet(table)
+        except gspread.WorksheetNotFound:
+            continue
+        values = worksheet.get_all_values()
+        if not values:
+            sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table])
+            continue
+        header, *rows = values
+        if not header:
+            sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table])
+            continue
+        df = pd.DataFrame(rows, columns=header)
+        df = df.replace("", pd.NA)
+        sheets[table] = df
+
+    if not sheets:
+        return False, ["Çalışma kitabında beklenen tablo adları bulunamadı."]
+
+    return import_db_from_frames(sheets)
+
+
+def export_db_to_google_sheet(sheet_id: str) -> tuple[bool, str]:
+    sheet_id = (sheet_id or "").strip()
+    if not sheet_id:
+        return False, "Google Sheet ID boş olamaz."
+    client, error = _get_gspread_client()
+    if error:
+        return False, error
+    try:
+        spreadsheet = client.open_by_key(sheet_id)
+    except Exception as exc:  # pragma: no cover - harici servis
+        return False, f"Google Sheet açılamadı: {exc}"
+
+    tables = fetch_db_tables()
+    for table, df in tables.items():
+        try:
+            worksheet = spreadsheet.worksheet(table)
+        except gspread.WorksheetNotFound:
+            rows = max(len(df) + 1, 1)
+            cols = max(len(df.columns), 1)
+            worksheet = spreadsheet.add_worksheet(title=table, rows=str(rows), cols=str(cols))
+        values = _df_to_gspread_values(df)
+        if not values:
+            values = [[""]]
+        row_count = len(values)
+        col_count = max((len(row) for row in values), default=1)
+        try:
+            worksheet.clear()
+            worksheet.resize(rows=row_count, cols=col_count)
+            worksheet.update(values)
+        except Exception as exc:  # pragma: no cover - harici servis
+            return False, f"{table} sayfası yazılamadı: {exc}"
+
+    return True, "Veritabanı Google Sheets'e aktarıldı."
+
 
 # ---------------------------
 # WhatsApp Cloud API
@@ -724,6 +893,40 @@ with st.sidebar:
                 status = "success" if success else "error"
                 st.session_state["import_feedback"] = (status, messages)
                 st.rerun()
+
+    st.markdown("### ☁️ Google Sheets Senkronizasyonu")
+    sheet_id_input = st.text_input(
+        "Google Sheet ID",
+        key="google_sheet_id",
+        help="Google Sheets URL'sinde bulunan kimliği girin.",
+    )
+    st.caption(
+        "Service account JSON bilgilerini `st.secrets` veya ortam değişkenlerinde tanımlayın."
+    )
+    col_gs_export, col_gs_import = st.columns(2)
+    export_clicked = col_gs_export.button(
+        "📤 Sheets'e Yedekle",
+        use_container_width=True,
+        disabled=not sheet_id_input.strip(),
+    )
+    import_clicked = col_gs_import.button(
+        "📥 Sheets'ten İçe Aktar",
+        use_container_width=True,
+        disabled=not sheet_id_input.strip(),
+    )
+
+    if export_clicked:
+        success, message = export_db_to_google_sheet(sheet_id_input)
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+    if import_clicked:
+        success, messages = import_db_from_google_sheet(sheet_id_input)
+        status = "success" if success else "error"
+        st.session_state["import_feedback"] = (status, messages)
+        st.rerun()                
     
     
     st.subheader("WhatsApp Ayarları")
