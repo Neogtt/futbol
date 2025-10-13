@@ -1,12 +1,30 @@
+from __future__ import annotations
+
 import os, time, sqlite3, requests, io, zipfile, json
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
 from xml.sax.saxutils import escape
 import numbers
 import streamlit as st
 import pandas as pd
-import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+try:
+    import gspread
+except ImportError:  # pragma: no cover - optional dependency
+    gspread = None  # type: ignore[assignment]
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helper
+    import gspread as gspread_types
+
+try:
+    from gspread import WorksheetNotFound
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - optional dependency
+    class WorksheetNotFound(Exception):
+        """Fallback when gspread isn't installed."""
+
+        pass
 
 # ---------------------------
 # Config & Secrets
@@ -202,6 +220,11 @@ def _load_service_account_info() -> dict[str, Any] | None:
 
 
 def _get_gspread_client() -> tuple[gspread.Client | None, str | None]:
+    if gspread is None:
+        return None, (
+            "Google Sheets entegrasyonu için gspread paketi yüklenmemiş. "
+            "requirements.txt dosyasına uygun şekilde kurulumu yapın."
+        )    
     info = _load_service_account_info()
     if not info:
         return None, (
@@ -551,7 +574,8 @@ def import_db_from_google_sheet(sheet_id: str) -> tuple[bool, list[str]]:
     for table in TABLE_NAMES:
         try:
             worksheet = spreadsheet.worksheet(table)
-        except gspread.WorksheetNotFound:
+        except WorksheetNotFound:
+            
             continue
         values = worksheet.get_all_values()
         if not values:
@@ -587,7 +611,7 @@ def export_db_to_google_sheet(sheet_id: str) -> tuple[bool, str]:
     for table, df in tables.items():
         try:
             worksheet = spreadsheet.worksheet(table)
-        except gspread.WorksheetNotFound:
+        except WorksheetNotFound:
             rows = max(len(df) + 1, 1)
             cols = max(len(df.columns), 1)
             worksheet = spreadsheet.add_worksheet(title=table, rows=str(rows), cols=str(cols))
