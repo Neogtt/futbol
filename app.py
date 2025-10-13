@@ -103,6 +103,12 @@ if "DB_PATH" not in st.session_state:
 if "google_sheet_id" not in st.session_state:
     st.session_state.google_sheet_id = DEFAULT_GOOGLE_SHEET_ID
 
+if "google_sheet_id_input" not in st.session_state:
+    st.session_state.google_sheet_id_input = st.session_state.get(
+        "google_sheet_id", ""
+    )
+
+
 if "local_excel_path" not in st.session_state:
     default_local_excel = os.path.abspath("futbol_okulu.xlsx")
     st.session_state.local_excel_path = default_local_excel
@@ -1202,6 +1208,27 @@ if import_feedback:
         
 
 sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
+
+
+sheet_id_text = sidebar.text_input(
+    "Google Sheets ID",
+    value=st.session_state.get("google_sheet_id_input", ""),
+    help=(
+        "Google Sheets senkronizasyonu için çalışma kitabının kimliğini girin. "
+        "Kimliği `https://docs.google.com/spreadsheets/d/<ID>/` adresindeki `<ID>` "
+        "bölümünden kopyalayabilirsiniz."
+    ),
+)
+
+sheet_id_input = sheet_id_text.strip()
+if sheet_id_input != st.session_state.get("google_sheet_id", ""):
+    st.session_state.google_sheet_id = sheet_id_input
+
+if sheet_id_text != sheet_id_input:
+    st.session_state.google_sheet_id_input = sheet_id_input
+else:
+    st.session_state.google_sheet_id_input = sheet_id_text
+
 sheet_id_input = st.session_state.get("google_sheet_id", "").strip()
 if sheet_id_input:
     masked_sheet_id = (
