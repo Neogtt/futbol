@@ -1140,31 +1140,10 @@ def detect_data_integrity_issues(limit: int = 5) -> list[str]:
 # ---------------------------
 # UI — Sidebar
 # ---------------------------
-def _db_persistence_note() -> str:
-    """Explain how the SQLite dosyası saklanıyor and warn about resets."""
-    path = st.session_state.get("DB_PATH", DEFAULT_DB_PATH)
-    if not os.path.isabs(path):
-        path = os.path.abspath(path)
-    if os.path.exists(path):
-        ts = datetime.fromtimestamp(os.path.getmtime(path))
-        formatted = ts.strftime("%d %B %Y %H:%M")
-        return (
-            "Veriler bu sunucuda yerel bir SQLite dosyasında tutulur. "
-            "Sunucu yeniden başlatılırsa ya da uygulama yeniden dağıtılırsa dosya sıfırlanabilir. "
-            f"Mevcut dosya yolu: `{path}` (son güncelleme: {formatted})."
-        )
-    return (
-        "Veriler yerel bir SQLite dosyasında saklanır. Sunucu yeniden başlarsa bu dosya yeniden "
-        "oluşacağı için daha önceki kayıtlar kaybolabilir. Düzenli yedek almayı unutmayın."
-    )
-
-
 sidebar = st.sidebar
 sidebar.title("⚽ Futbol Okulu")
 sidebar.caption("Ödeme Takip + WhatsApp")
 sidebar.markdown("---")
-with sidebar.expander("ℹ️ Veri Depolama Bilgisi", expanded=False):
-    sidebar.info(_db_persistence_note())
 
 sidebar.markdown("### 📋 Menü")
 MENU_OPTIONS = [
