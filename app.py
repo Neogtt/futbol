@@ -431,8 +431,12 @@ def export_db_to_excel_bytes() -> bytes:
                             "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
                             "<Application>Futbol Okulu</Application>"
                             "</Properties>")
+def _escape_sheet_attr(value: str) -> str:
+    # XML öznitelikleri için çift tırnak kaçışı
+    return escape(value, {'"': '&quot;'})
+    
                 workbook_sheets_xml = "".join(
-                    f"<sheet name=\"{escape(name, {'\"':'&quot;'})}\" sheetId=\"{idx}\" r:id=\"rId{idx}\"/>"
+                    f'<sheet name="{_escape_sheet_attr(name)}" sheetId="{idx}" r:id="rId{idx}"/>'
                     for idx, (name, _) in enumerate(sheet_entries, start=1)
                 )
                 zf.writestr("xl/workbook.xml",
