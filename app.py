@@ -396,68 +396,83 @@ def export_db_to_excel_bytes() -> bytes:
                 )
                 sheet_entries.append((sheet_name, sheet_xml))
 
+             def _escape_sheet_attr(value: str) -> str:
+                # XML öznitelikleri için çift tırnak kaçışı
+                return escape(value, {'"': '&quot;'})           
+
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("[Content_Types].xml",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-                            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-                            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-                            "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-                            "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
-                            + "".join(
-                                f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" "
-                                "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
-                                for idx in range(1, len(sheet_entries) + 1)
-                            )
-                            + "</Types>")
-                zf.writestr("_rels/.rels",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
-                            "</Relationships>")
-                zf.writestr("docProps/core.xml",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                            "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
-                            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
-                            "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
-                            "<dc:creator>Futbol Okulu</dc:creator>"
-                            "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
-                            f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:created>"
-                            f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:modified>"
-                            "</cp:coreProperties>")
-                zf.writestr("docProps/app.xml",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                            "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
-                            "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
-                            "<Application>Futbol Okulu</Application>"
-                            "</Properties>")
-def _escape_sheet_attr(value: str) -> str:
-    # XML öznitelikleri için çift tırnak kaçışı
-    return escape(value, {'"': '&quot;'})
+                zf.writestr(
+                    "[Content_Types].xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+                    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+                    "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+                    "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+                    "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+                    + "".join(
+                        f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" "
+                        "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+                        for idx in range(1, len(sheet_entries) + 1)
+                    )
+                    + "</Types>",
+                )
+                zf.writestr(
+                    "_rels/.rels",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
+                    "</Relationships>",
+                )
+                zf.writestr(
+                    "docProps/core.xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
+                    "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
+                    "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
+                    "<dc:creator>Futbol Okulu</dc:creator>"
+                    "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
+                    f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:created>"
+                    f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:modified>"
+                    "</cp:coreProperties>",
+                )
+                zf.writestr(
+                    "docProps/app.xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
+                    "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
+                    "<Application>Futbol Okulu</Application>"
+                    "</Properties>",
+                )
     
                 workbook_sheets_xml = "".join(
                     f'<sheet name="{_escape_sheet_attr(name)}" sheetId="{idx}" r:id="rId{idx}"/>'
                     for idx, (name, _) in enumerate(sheet_entries, start=1)
                 )
-                zf.writestr("xl/workbook.xml",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                            "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
-                            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-                            "<bookViews><workbookView/></bookViews>"
-                            f"<sheets>{workbook_sheets_xml}</sheets>"
-                            "</workbook>")
+                zf.writestr(
+                    "xl/workbook.xml",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+                    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                    "<bookViews><workbookView/></bookViews>"
+                    f"<sheets>{workbook_sheets_xml}</sheets>"
+                    "</workbook>",
+                )
                 workbook_rels_xml = "".join(
                     f"<Relationship Id=\"rId{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{idx}.xml\"/>"
                     for idx in range(1, len(sheet_entries) + 1)
                 )
-                zf.writestr("xl/_rels/workbook.xml.rels",
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                            f"{workbook_rels_xml}"
-                            "</Relationships>")
+                zf.writestr(
+                    "xl/_rels/workbook.xml.rels",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    f"{workbook_rels_xml}"
+                    "</Relationships>",
+                )
                 for idx, (_, sheet_xml) in enumerate(sheet_entries, start=1):
                     zf.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml)
-            buffer.seek(0); return buffer.getvalue()
+
+            buffer.seek(0)
+            return buffer.getvalue()
 
 def _normalize_import_value(value, column: str):
     if value is None: return None
