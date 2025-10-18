@@ -43,6 +43,12 @@ def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[b
 
     core_cols = ["BRK","ADI_SOYADI","D_T","GRUP_ADI","BABA_TEL","ANNE_TEL","KAYIT_TARIHI",
                  "ÜYELİK_TERCİHİ","ÜYELİK_YENİLEME_TARIHİ"]
+
+    # bazı id sütunları Excel'de bulunmayabiliyor; melt işlemi için eksikleri ekle
+    for col in core_cols:
+        if col not in df.columns:
+            df[col] = ""
+
     month_cols = [c for c in df.columns if c not in core_cols]
 
     def pick_phone(row: pd.Series) -> str:
