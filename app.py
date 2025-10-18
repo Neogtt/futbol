@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os, time, sqlite3, requests, io, zipfile, json, re, numbers
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Any, TYPE_CHECKING
+from typing import List, Dict, Any, TYPE_CHECKING, IO
 from xml.sax.saxutils import escape
 from xml.etree import ElementTree as ET
 
@@ -12,12 +12,26 @@ import streamlit as st
 # =========================
 # Sheet1 'wide' Excel -> DB
 # =========================
-def import_sheet1_wide_excel_to_db(path: str, sheet_name: str = "Sheet1") -> tuple[bool, list[str]]:
+def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[bytes], sheet_name: str = "Sheet1") -> tuple[bool, list[str]]:
     """BRK, ADI SOYADI, D.T, GRUP ADI, BABA TEL, ANNE TEL + ay kolonlarını students/invoices'a yazar."""
+    display_name = getattr(path_or_buffer, "name", "yüklenen dosya")
+    source: str | IO[bytes]
+    if isinstance(path_or_buffer, (str, os.PathLike)):
+        fs_path = os.fspath(path_or_buffer)
+        display_name = fs_path
+        if not os.path.exists(fs_path):
+            return False, [f"Excel dosyası bulunamadı: {fs_path}"]
+        source = fs_path
+    else:
+        source = path_or_buffer
+        try:
+            path_or_buffer.seek(0)
+        except (AttributeError, io.UnsupportedOperation):
+            pass    
     try:
-        raw = pd.read_excel(path, sheet_name=sheet_name, dtype=str).fillna("")
+        raw = pd.read_excel(source, sheet_name=sheet_name, dtype=str).fillna("")
     except Exception as exc:
-        return False, [f"Excel okunamadı ({sheet_name}): {exc}"]
+        return False, [f"Excel okunamadı ({sheet_name} - {display_name}): {exc}"]
 
     df = raw.copy()
     df.columns = (df.columns
@@ -871,13 +885,19 @@ excel_path_input = sidebar.text_input(
     value="ŞAHİNBEY 2025-2026 AİDAT ÇİZELGESİ VE TÜM BİLGİLER.xlsx",
     help="Sheet1 başlıklı aidat çizelgesi dosyanızın yolu.",
 )
+uploaded_excel_file = sidebar.file_uploader(
+    "veya dosya yükleyin",
+    type=["xlsx", "xls"],
+    help="Dosya sisteminizden Excel dosyası seçin.",
+)
 if sidebar.button("Sheet1 → students + invoices aktar", use_container_width=True):
-    ok, msgs = import_sheet1_wide_excel_to_db(excel_path_input, sheet_name="Sheet1")
-    if ok:
-        sidebar.success("İçe aktarma tamamlandı ✅\n" + "\n".join(f"- {m}" for m in msgs))
-        st.rerun()
     else:
-        sidebar.error("Hata:\n" + "\n".join(f"- {m}" for m in msgs))
+        ok, msgs = import_sheet1_wide_excel_to_db(source, sheet_name="Sheet1")
+        if ok:
+            sidebar.success("İçe aktarma tamamlandı ✅\n" + "\n".join(f"- {m}" for m in msgs))
+            st.rerun()
+        else:
+            sidebar.error("Hata:\n" + "\n".join(f"- {m}" for m in msgs))
 
 # Yerel Excel senkronizasyonu (tablo-tablo)
 sidebar.markdown("#### 💾 Yerel Excel Senkronizasyonu (tablo-tablo)")
