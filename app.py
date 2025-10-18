@@ -891,7 +891,15 @@ uploaded_excel_file = sidebar.file_uploader(
     help="Dosya sisteminizden Excel dosyası seçin.",
 )
 if sidebar.button("Sheet1 → students + invoices aktar", use_container_width=True):
-        else:
+    source: str | IO[bytes] | None = None
+    if uploaded_excel_file is not None:
+        source = uploaded_excel_file
+    elif excel_path_input.strip():
+        source = excel_path_input.strip()
+    else:
+        sidebar.warning("Lütfen geçerli bir Excel yolu girin veya dosya yükleyin.")
+
+    if source is not None:
         ok, msgs = import_sheet1_wide_excel_to_db(source, sheet_name="Sheet1")
         if ok:
             sidebar.success("İçe aktarma tamamlandı ✅\n" + "\n".join(f"- {m}" for m in msgs))
