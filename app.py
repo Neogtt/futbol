@@ -77,8 +77,17 @@ def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[b
                  "EKIM":10,"EKİM":10,"KASIM":11,"ARALIK":12}
 
     import calendar
-    def parse_month_year(colname: str) -> tuple[int,int]:
-        c = colname.upper().replace(".", "").replace("İ","I").replace("Ğ","G").replace("Ü","U").replace("Ş","S").replace("Ç","C")
+    def parse_month_year(colname: str | float | int | None) -> tuple[int,int]:
+        if colname is None or (isinstance(colname, float) and pd.isna(colname)):
+            text = ""
+        elif isinstance(colname, (int, float)):
+            if isinstance(colname, float) and colname.is_integer():
+                text = str(int(colname))
+            else:
+                text = str(colname)
+        else:
+            text = str(colname)
+        c = text.upper().replace(".", "").replace("İ","I").replace("Ğ","G").replace("Ü","U").replace("Ş","S").replace("Ç","C")
         m = re.search(r"(\d{2})$", c)
         if m:
             yy = int(m.group(1)); year = 2000 + yy
