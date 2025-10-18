@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os, time, sqlite3, requests, io, zipfile, json, re, numbers
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Any, TYPE_CHECKING, IO
+from typing import List, Dict, Any, TYPE_CHECKING, IO, Iterator
 from xml.sax.saxutils import escape
 from xml.etree import ElementTree as ET
 
@@ -298,6 +298,29 @@ def fetch_db_tables() -> dict[str, pd.DataFrame]:
     finally:
         conn.close()
 
+EXCEL_MAX_ROWS = 1_048_576
+
+
+def _sanitize_excel_sheet_name(name: str, position: int, used: set[str]) -> str:
+    invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
+    sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
+    if not sanitized:
+        sanitized = f"Sheet{position}"
+    if len(sanitized) > 31:
+        sanitized = sanitized[:31]
+
+    candidate = sanitized
+    suffix = 1
+    while candidate in used:
+        suffix_text = f"_{suffix}"
+        candidate = (sanitized[: 31 - len(suffix_text)] if len(sanitized) + len(suffix_text) > 31 else sanitized) + suffix_text
+        suffix += 1
+
+    used.add(candidate)
+    return candidate
+
+
+
 def _df_to_gspread_values(df: pd.DataFrame) -> list[list[Any]]:
     values: list[list[Any]] = []
     headers = [str(col) for col in df.columns]
@@ -344,10 +367,28 @@ def _get_gspread_client():
 
 def export_db_to_excel_bytes() -> bytes:
     sheets = fetch_db_tables()
+    def _iter_excel_sheets() -> Iterator[tuple[str, pd.DataFrame]]:
+        used_names: set[str] = set()
+        position = 0
+        for original_name, df in sheets.items():
+            total_rows = len(df)
+            if total_rows == 0:
+                boundaries = [(0, 0)]
+            else:
+                boundaries = [(start, min(start + EXCEL_MAX_ROWS, total_rows))
+                              for start in range(0, total_rows, EXCEL_MAX_ROWS)]
+
+            for chunk_idx, (start, end) in enumerate(boundaries):
+                position += 1
+                candidate_name = original_name if chunk_idx == 0 else f"{original_name}_part{chunk_idx + 1}"
+                sheet_name = _sanitize_excel_sheet_name(candidate_name, position, used_names)
+                yield sheet_name, df.iloc[start:end]
+
+    
     def _write_excel(engine: str) -> bytes:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine=engine) as writer:
-            for sheet_name, df in sheets.items():
+            for sheet_name, df in _iter_excel_sheets():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
         buffer.seek(0)
         return buffer.getvalue()
@@ -361,7 +402,6 @@ def export_db_to_excel_bytes() -> bytes:
             timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
             buffer = io.BytesIO()
             sheet_entries: list[tuple[str, str]] = []
-            used_names: set[str] = set()
 
             def _column_letter(idx: int) -> str:
                 letters = []
@@ -369,21 +409,7 @@ def export_db_to_excel_bytes() -> bytes:
                     idx, remainder = divmod(idx - 1, 26)
                     letters.append(chr(65 + remainder))
                 return "".join(reversed(letters)) or "A"
-
-            def _sanitize_sheet_name(name: str, position: int, used: set[str]) -> str:
-                invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
-                sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
-                sanitized = sanitized or f"Sheet{position}"
-                if len(sanitized) > 31: sanitized = sanitized[:31]
-                candidate, suffix = sanitized, 1
-                while candidate in used:
-                    s = f"_{suffix}"
-                    candidate = sanitized[: 31 - len(s)] + s
-                    suffix += 1
-                used.add(candidate); return candidate
-
-            for idx, (original_name, df) in enumerate(sheets.items(), start=1):
-                sheet_name = _sanitize_sheet_name(original_name, idx, used_names)
+            for sheet_name, df in _iter_excel_sheets():
                 rows: list[list[Any]] = []
                 if list(df.columns): rows.append([str(col) for col in df.columns])
                 for record in df.itertuples(index=False, name=None):
