@@ -37,8 +37,9 @@ def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[b
     df.columns = (df.columns
                   .str.strip()
                   .str.upper()
-                  .str.replace(r"\s+", "_", regex=True)
-                  .str.replace(r"\.", "", regex=True))
+                  .str.replace(r"[\s\.]+", "_", regex=True)
+                  .str.replace(r"__+", "_", regex=True)
+                  .str.strip("_"))
 
     core_cols = ["BRK","ADI_SOYADI","D_T","GRUP_ADI","BABA_TEL","ANNE_TEL","KAYIT_TARIHI",
                  "ÜYELİK_TERCİHİ","ÜYELİK_YENİLEME_TARIHİ"]
