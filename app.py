@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-import os, time, sqlite3, requests, io, zipfile, json, re
+import os, time, sqlite3, requests, io, zipfile, json, re, numbers
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, TYPE_CHECKING
 from xml.sax.saxutils import escape
-import numbers
-import streamlit as st
-import pandas as pd
+from xml.etree import ElementTree as ET
 
-# ---------------------------
-# (YENİ) Sheet1 'wide' Excel -> DB içe aktarma fonksiyonu
-# ---------------------------
+import pandas as pd
+import streamlit as st
+
+# =========================
+# Sheet1 'wide' Excel -> DB
+# =========================
 def import_sheet1_wide_excel_to_db(path: str, sheet_name: str = "Sheet1") -> tuple[bool, list[str]]:
-    """
-    BRK, ADI SOYADI, D.T, GRUP ADI, BABA TEL, ANNE TEL, ... + ay kolonları olan
-    'wide' excel'i okuyup students + invoices tablolarına yazar.
-    """
+    """BRK, ADI SOYADI, D.T, GRUP ADI, BABA TEL, ANNE TEL + ay kolonlarını students/invoices'a yazar."""
     try:
         raw = pd.read_excel(path, sheet_name=sheet_name, dtype=str).fillna("")
     except Exception as exc:
@@ -35,13 +33,9 @@ def import_sheet1_wide_excel_to_db(path: str, sheet_name: str = "Sheet1") -> tup
     def pick_phone(row: pd.Series) -> str:
         p = row.get("BABA_TEL","") or row.get("ANNE_TEL","")
         p = str(p).strip().replace(" ", "").replace("-", "")
-        if p.startswith("0"):
-            p = "+9" + p
-        elif p.startswith("90"):
-            p = "+" + p
-        elif not p.startswith("+"):
-            if len(p) >= 10:
-                p = "+90" + p[-10:]
+        if p.startswith("0"): p = "+9" + p
+        elif p.startswith("90"): p = "+" + p
+        elif not p.startswith("+") and len(p) >= 10: p = "+90" + p[-10:]
         return p
 
     students = pd.DataFrame({
@@ -94,10 +88,8 @@ def import_sheet1_wide_excel_to_db(path: str, sheet_name: str = "Sheet1") -> tup
             return ("bekliyor", 0.0)
         try:
             amount = float(t.replace(",", "."))
-            if amount > 0:
-                return ("odendi", amount)
-        except:
-            pass
+            if amount > 0: return ("odendi", amount)
+        except: pass
         return ("odendi", 0.0)
 
     norm = melted["ODEME_DURUM"].apply(normalize_status)
@@ -140,30 +132,27 @@ def import_sheet1_wide_excel_to_db(path: str, sheet_name: str = "Sheet1") -> tup
     inserted = 0
     for _, r in merged2.iterrows():
         sid = r.get("id")
-        if pd.isna(sid):
-            continue
+        if pd.isna(sid): continue
         donem = f"{int(r['year'])}-{int(r['month']):02d}"
         c.execute("""INSERT INTO invoices(student_id, donem, tutar, son_odeme_tarihi, durum)
                      VALUES(?,?,?,?,?)""",
                   (int(sid), donem, float(r["tutar"] or 0.0), r["son_odeme_tarihi"], r["durum"]))
         inserted += 1
 
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     return True, [f"Öğrenci sayısı: {len(students)}", f"Fatura kaydı: {inserted}"]
 
-
-# ---------------------------
-# Opsiyonel Streamlit Secrets türü
-# ---------------------------
+# =========================
+# Opsiyonel Streamlit Secrets tipi
+# =========================
 try:
     from streamlit.runtime.secrets import StreamlitSecretNotFoundError
 except Exception:
-    class StreamlitSecretNotFoundError(Exception):
-        pass
+    class StreamlitSecretNotFoundError(Exception): pass
 
-from xml.etree import ElementTree as ET
-
+# =========================
+# Google Sheets yardımcıları
+# =========================
 try:
     from google.oauth2.service_account import Credentials as GoogleCredentials
 except ImportError:
@@ -180,12 +169,11 @@ if TYPE_CHECKING:
 try:
     from gspread import WorksheetNotFound
 except (ImportError, ModuleNotFoundError):
-    class WorksheetNotFound(Exception):
-        pass
+    class WorksheetNotFound(Exception): pass
 
-# ---------------------------
+# =========================
 # Config & Secrets
-# ---------------------------
+# =========================
 st.set_page_config(page_title="Futbol Okulu • Tahsilat & WhatsApp", layout="wide")
 
 def _get_secret(name: str, default: str = "") -> str:
@@ -199,17 +187,12 @@ WABA_PHONE_NUMBER_ID = _get_secret("WABA_PHONE_NUMBER_ID")
 GRAPH_BASE = "https://graph.facebook.com/v20.0"
 
 DEFAULT_DB_PATH = "futbol_okulu.db"
-DEFAULT_GOOGLE_SHEET_ID = _get_secret("GOOGLE_SHEET_ID", "")
-if not DEFAULT_GOOGLE_SHEET_ID:
-    DEFAULT_GOOGLE_SHEET_ID = "17-vOIoebsR7W7Bp83tbKZ7QOoC3oeUJ8"
+DEFAULT_GOOGLE_SHEET_ID = _get_secret("GOOGLE_SHEET_ID", "") or "17-vOIoebsR7W7Bp83tbKZ7QOoC3oeUJ8"
 
 TABLE_NAMES = ["students", "groups", "invoices", "payments", "msg_log"]
 
 EXPECTED_IMPORT_COLUMNS: dict[str, list[str]] = {
-    "students": [
-        "id","ad","soyad","veli_ad","veli_tel","takim",
-        "kayit_tarihi","dogum_tarihi","aktif_mi","uye_tipi",
-    ],
+    "students": ["id","ad","soyad","veli_ad","veli_tel","takim","kayit_tarihi","dogum_tarihi","aktif_mi","uye_tipi"],
     "groups": ["id", "ad"],
     "invoices": ["id","student_id","donem","tutar","son_odeme_tarihi","durum"],
     "payments": ["id","invoice_id","tarih","tutar","aciklama"],
@@ -225,35 +208,22 @@ if "google_sheet_id_input" not in st.session_state:
 if "local_excel_path" not in st.session_state:
     st.session_state.local_excel_path = os.path.abspath("futbol_okulu.xlsx")
 
-# ---------------------------
+# =========================
 # DB Helpers
-# ---------------------------
+# =========================
 def get_conn():
     return sqlite3.connect(st.session_state.DB_PATH, check_same_thread=False)
 
 def init_db():
-    conn = get_conn()
-    c = conn.cursor()
+    conn = get_conn(); c = conn.cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ad TEXT,
-        soyad TEXT,
-        veli_ad TEXT,
-        veli_tel TEXT,
-        takim TEXT,
-        kayit_tarihi TEXT,
-        dogum_tarihi TEXT,
-        aktif_mi INTEGER DEFAULT 1,
-        uye_tipi TEXT DEFAULT 'Aylık'
+        ad TEXT, soyad TEXT, veli_ad TEXT, veli_tel TEXT,
+        takim TEXT, kayit_tarihi TEXT, dogum_tarihi TEXT,
+        aktif_mi INTEGER DEFAULT 1, uye_tipi TEXT DEFAULT 'Aylık'
     )
     """)
-    c.execute("PRAGMA table_info(students)")
-    columns = [row[1] for row in c.fetchall()]
-    if "uye_tipi" not in columns:
-        c.execute("ALTER TABLE students ADD COLUMN uye_tipi TEXT DEFAULT 'Aylık'")
-    if "kayit_tarihi" not in columns:
-        c.execute("ALTER TABLE students ADD COLUMN kayit_tarihi TEXT")
     c.execute("""
         CREATE TABLE IF NOT EXISTS groups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,108 +233,76 @@ def init_db():
     c.execute("""
     CREATE TABLE IF NOT EXISTS invoices (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER,
-        donem TEXT,
-        tutar REAL,
-        son_odeme_tarihi TEXT,
-        durum TEXT DEFAULT 'bekliyor',
+        student_id INTEGER, donem TEXT, tutar REAL,
+        son_odeme_tarihi TEXT, durum TEXT DEFAULT 'bekliyor',
         FOREIGN KEY(student_id) REFERENCES students(id)
     )
     """)
     c.execute("""
     CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_id INTEGER,
-        tarih TEXT,
-        tutar REAL,
-        aciklama TEXT,
+        invoice_id INTEGER, tarih TEXT, tutar REAL, aciklama TEXT,
         FOREIGN KEY(invoice_id) REFERENCES invoices(id)
     )
     """)
     c.execute("""
     CREATE TABLE IF NOT EXISTS msg_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT,
-        template_name TEXT,
-        msg_type TEXT,
-        payload TEXT,
-        status TEXT,
-        ts TEXT
+        phone TEXT, template_name TEXT, msg_type TEXT,
+        payload TEXT, status TEXT, ts TEXT
     )
     """)
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 init_db()
 
-# ---------------------------
-# Backup & Restore Helpers (Excel/Sheets)
-# ---------------------------
+# =========================
+# Backup & Restore (Excel/Sheets)
+# =========================
 def fetch_db_tables() -> dict[str, pd.DataFrame]:
     conn = get_conn()
-    tables: dict[str, pd.DataFrame] = {}
     try:
-        for table in TABLE_NAMES:
-            try:
-                tables[table] = pd.read_sql_query(f"SELECT * FROM {table}", conn)
-            except Exception:
-                tables[table] = pd.DataFrame()
+        return {t: pd.read_sql_query(f"SELECT * FROM {t}", conn) for t in TABLE_NAMES}
+    except Exception:
+        return {t: pd.DataFrame() for t in TABLE_NAMES}
     finally:
         conn.close()
-    return tables
 
 def _df_to_gspread_values(df: pd.DataFrame) -> list[list[Any]]:
     values: list[list[Any]] = []
     headers = [str(col) for col in df.columns]
-    if headers:
-        values.append(headers)
+    if headers: values.append(headers)
     for record in df.itertuples(index=False, name=None):
-        row_values: list[Any] = []
-        for value in record:
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                row_values.append("")
-            else:
-                row_values.append(value)
+        row_values = [("" if (v is None or (isinstance(v, float) and pd.isna(v))) else v) for v in record]
         values.append(row_values)
     return values
 
 def _load_service_account_info() -> dict[str, Any] | None:
-    candidate_keys = [
-        "gcp_service_account","service_account","google_service_account",
-        "GOOGLE_SERVICE_ACCOUNT_JSON","GOOGLE_APPLICATION_CREDENTIALS_JSON",
-    ]
+    candidate_keys = ["gcp_service_account","service_account","google_service_account",
+                      "GOOGLE_SERVICE_ACCOUNT_JSON","GOOGLE_APPLICATION_CREDENTIALS_JSON"]
     for key in candidate_keys:
         try:
             secret_value = st.secrets[key]
-            if isinstance(secret_value, dict):
-                return secret_value
-            if isinstance(secret_value, str) and secret_value.strip():
-                return json.loads(secret_value)
-        except (KeyError, FileNotFoundError):
-            pass
+            if isinstance(secret_value, dict): return secret_value
+            if isinstance(secret_value, str) and secret_value.strip(): return json.loads(secret_value)
+        except (KeyError, FileNotFoundError): pass
         env_value = os.getenv(key)
         if env_value and env_value.strip():
-            try:
-                return json.loads(env_value)
-            except json.JSONDecodeError:
-                continue
+            try: return json.loads(env_value)
+            except json.JSONDecodeError: continue
     return None
 
 def _get_gspread_client():
     if gspread is None:
-        return None, ("Google Sheets entegrasyonu için gspread paketi yüklenmemiş. "
-                      "requirements.txt dosyasına uygun şekilde kurulumu yapın.")
+        return None, "Google Sheets için gspread paketi eksik."
     if GoogleCredentials is None:
-        return None, ("Google Sheets entegrasyonu için google-auth paketi yüklenmemiş. "
-                      "requirements.txt dosyasına uygun şekilde kurulumu yapın.")
+        return None, "Google Sheets için google-auth paketi eksik."
     info = _load_service_account_info()
     if not info:
-        return None, ("Google service account bilgisi bulunamadı. "
-                      "Streamlit secrets veya ortam değişkenlerinde kimlik bilgilerini tanımlayın.")
+        return None, "Service account JSON bulunamadı (secrets veya env)."
     try:
         credentials = GoogleCredentials.from_service_account_info(
-            info,
-            scopes=[
+            info, scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive.file",
             ],
@@ -383,316 +321,215 @@ def export_db_to_excel_bytes() -> bytes:
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
         buffer.seek(0)
         return buffer.getvalue()
-
-    def _column_letter(idx: int) -> str:
-        letters = []
-        while idx > 0:
-            idx, remainder = divmod(idx - 1, 26)
-            letters.append(chr(65 + remainder))
-        return "".join(reversed(letters)) or "A"
-
-    def _sanitize_sheet_name(name: str, position: int, used: set[str]) -> str:
-        invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
-        sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
-        sanitized = sanitized or f"Sheet{position}"
-        if len(sanitized) > 31:
-            sanitized = sanitized[:31]
-        candidate = sanitized
-        suffix = 1
-        while candidate in used:
-            suffix_str = f"_{suffix}"
-            candidate = sanitized[: 31 - len(suffix_str)] + suffix_str
-            suffix += 1
-        used.add(candidate)
-        return candidate
-
-    def _write_simple_xlsx() -> bytes:
-        from io import BytesIO
-        buffer = BytesIO()
-        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        sheet_entries: list[tuple[str, str]] = []
-        used_names: set[str] = set()
-
-        def _escape_attr(value: str) -> str:
-            return escape(value, {'"': '&quot;'})
-
-        sheets_local = sheets
-        cells_docs: list[tuple[str, str]] = []
-
-        # build XML sheets
-        for idx, (original_name, df) in enumerate(sheets_local.items(), start=1):
-            sheet_name = _sanitize_sheet_name(original_name, idx, used_names)
-            rows: list[list[Any]] = []
-            if list(df.columns):
-                rows.append([str(col) for col in df.columns])
-            for record in df.itertuples(index=False, name=None):
-                row_values: list[Any] = []
-                for value in record:
-                    if value is None or (isinstance(value, float) and pd.isna(value)):
-                        row_values.append("")
-                    else:
-                        row_values.append(value)
-                rows.append(row_values)
-
-            max_columns = max((len(r) for r in rows), default=0)
-            max_rows = len(rows) or 1
-            if max_columns == 0:
-                dimension = "A1"
-            else:
-                dimension = f"A1:{_column_letter(max_columns)}{max_rows}"
-
-            namespaces = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-            cells_xml: list[str] = []
-            for r_idx, row in enumerate(rows, start=1):
-                cell_xml: list[str] = []
-                for c_idx in range(1, max_columns + 1):
-                    cell_ref = f"{_column_letter(c_idx)}{r_idx}"
-                    try:
-                        value = row[c_idx - 1]
-                    except IndexError:
-                        value = ""
-                    if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
-                        cell_xml.append(f"<c r=\"{cell_ref}\"/>")
-                        continue
-                    if isinstance(value, numbers.Number) and not isinstance(value, bool):
-                        cell_xml.append(f"<c r=\"{cell_ref}\"><v>{value}</v></c>")
-                        continue
-                    if isinstance(value, bool):
-                        cell_xml.append(f"<c r=\"{cell_ref}\" t=\"b\"><v>{int(value)}</v></c>")
-                        continue
-                    text_value = str(value)
-                    if text_value == "":
-                        cell_xml.append(f"<c r=\"{cell_ref}\"/>")
-                    else:
-                        cell_xml.append(
-                            "<c r=\"{ref}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>".format(
-                                ref=cell_ref, text=escape(text_value),
-                            )
-                        )
-                cells_xml.append(f"<row r=\"{r_idx}\">{''.join(cell_xml)}</row>")
-
-            sheet_xml = (
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                f"<worksheet xmlns=\"{namespaces}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-                f"<dimension ref=\"{dimension}\"/>"
-                "<sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>"
-                "<sheetFormatPr defaultRowHeight=\"15\"/>"
-                f"<sheetData>{''.join(cells_xml)}</sheetData>"
-                "</worksheet>"
-            )
-            sheet_entries.append((sheet_name, sheet_xml))
-
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(
-                "[Content_Types].xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-                "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-                "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-                "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-                "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
-                + "".join(
-                    f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
-                    for idx in range(1, len(sheet_entries) + 1)
-                )
-                + "</Types>",
-            )
-            zf.writestr(
-                "_rels/.rels",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
-                "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>"
-                "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" Target=\"docProps/app.xml\"/>"
-                "</Relationships>",
-            )
-            zf.writestr(
-                "docProps/core.xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
-                "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
-                "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
-                "<dc:creator>Futbol Okulu</dc:creator>"
-                "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
-                f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{datetime.utcnow().replace(microsecond=0).isoformat()}Z</dcterms:created>"
-                f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{datetime.utcnow().replace(microsecond=0).isoformat()}Z</dcterms:modified>"
-                "</cp:coreProperties>",
-            )
-            zf.writestr(
-                "docProps/app.xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
-                "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
-                "<Application>Futbol Okulu</Application>"
-                "</Properties>",
-            )
-
-            def _escape_sheet_attr(value: str) -> str:
-                return escape(value, {'"': '&quot;'})
-
-            workbook_sheets_xml = "".join(
-                f"<sheet name=\"{_escape_sheet_attr(name)}\" sheetId=\"{idx}\" r:id=\"rId{idx}\"/>"
-                for idx, (name, _) in enumerate(sheet_entries, start=1)
-            )
-            zf.writestr(
-                "xl/workbook.xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
-                "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-                "<bookViews><workbookView/></bookViews>"
-                f"<sheets>{workbook_sheets_xml}</sheets>"
-                "</workbook>",
-            )
-
-            workbook_rels_xml = "".join(
-                f"<Relationship Id=\"rId{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{idx}.xml\"/>"
-                for idx in range(1, len(sheet_entries) + 1)
-            )
-            workbook_rels_xml += "<Relationship Id=\"rId{0}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>".format(len(sheet_entries) + 1)
-            zf.writestr(
-                "xl/_rels/workbook.xml.rels",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                f"{workbook_rels_xml}"
-                "</Relationships>",
-            )
-
-            zf.writestr(
-                "xl/styles.xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
-                "<fonts count=\"1\"><font><sz val=\"11\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/></font></fonts>"
-                "<fills count=\"1\"><fill><patternFill patternType=\"none\"/></fill></fills>"
-                "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"
-                "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
-                "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs>"
-                "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
-                "</styleSheet>",
-            )
-
-            for idx, (_, sheet_xml) in enumerate(sheet_entries, start=1):
-                zf.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml)
-
-        buffer.seek(0)
-        return buffer.getvalue()
-
     try:
         return _write_excel("openpyxl")
     except ModuleNotFoundError:
         try:
             return _write_excel("xlsxwriter")
         except ModuleNotFoundError:
-            return _write_simple_xlsx()
+            # Minimal writer
+            timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+            buffer = io.BytesIO()
+            sheet_entries: list[tuple[str, str]] = []
+            used_names: set[str] = set()
+
+            def _column_letter(idx: int) -> str:
+                letters = []
+                while idx > 0:
+                    idx, remainder = divmod(idx - 1, 26)
+                    letters.append(chr(65 + remainder))
+                return "".join(reversed(letters)) or "A"
+
+            def _sanitize_sheet_name(name: str, position: int, used: set[str]) -> str:
+                invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
+                sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
+                sanitized = sanitized or f"Sheet{position}"
+                if len(sanitized) > 31: sanitized = sanitized[:31]
+                candidate, suffix = sanitized, 1
+                while candidate in used:
+                    s = f"_{suffix}"
+                    candidate = sanitized[: 31 - len(s)] + s
+                    suffix += 1
+                used.add(candidate); return candidate
+
+            for idx, (original_name, df) in enumerate(sheets.items(), start=1):
+                sheet_name = _sanitize_sheet_name(original_name, idx, used_names)
+                rows: list[list[Any]] = []
+                if list(df.columns): rows.append([str(col) for col in df.columns])
+                for record in df.itertuples(index=False, name=None):
+                    row_values = [("" if (v is None or (isinstance(v, float) and pd.isna(v))) else v) for v in record]
+                    rows.append(row_values)
+
+                max_columns = max((len(r) for r in rows), default=0)
+                max_rows = len(rows) or 1
+                dimension = "A1" if max_columns == 0 else f"A1:{_column_letter(max_columns)}{max_rows}"
+
+                cells_xml: list[str] = []
+                for r_idx, row in enumerate(rows, start=1):
+                    cell_xml: list[str] = []
+                    for c_idx in range(1, max_columns + 1):
+                        cell_ref = f"{_column_letter(c_idx)}{r_idx}"
+                        try: value = row[c_idx - 1]
+                        except IndexError: value = ""
+                        if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+                            cell_xml.append(f"<c r=\"{cell_ref}\"/>"); continue
+                        if isinstance(value, numbers.Number) and not isinstance(value, bool):
+                            cell_xml.append(f"<c r=\"{cell_ref}\"><v>{value}</v></c>"); continue
+                        if isinstance(value, bool):
+                            cell_xml.append(f"<c r=\"{cell_ref}\" t=\"b\"><v>{int(value)}</v></c>"); continue
+                        cell_xml.append(
+                            "<c r=\"{ref}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>".format(
+                                ref=cell_ref, text=escape(str(value)),
+                            )
+                        )
+                    cells_xml.append(f"<row r=\"{r_idx}\">{''.join(cell_xml)}</row>")
+
+                sheet_xml = (
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\""
+                    " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                    f"<dimension ref=\"{dimension}\"/>"
+                    "<sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>"
+                    "<sheetFormatPr defaultRowHeight=\"15\"/>"
+                    f"<sheetData>{''.join(cells_xml)}</sheetData>"
+                    "</worksheet>"
+                )
+                sheet_entries.append((sheet_name, sheet_xml))
+
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("[Content_Types].xml",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+                            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+                            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+                            "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+                            "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+                            + "".join(
+                                f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" "
+                                "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+                                for idx in range(1, len(sheet_entries) + 1)
+                            )
+                            + "</Types>")
+                zf.writestr("_rels/.rels",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
+                            "</Relationships>")
+                zf.writestr("docProps/core.xml",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
+                            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
+                            "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
+                            "<dc:creator>Futbol Okulu</dc:creator>"
+                            "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
+                            f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:created>"
+                            f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:modified>"
+                            "</cp:coreProperties>")
+                zf.writestr("docProps/app.xml",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
+                            "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
+                            "<Application>Futbol Okulu</Application>"
+                            "</Properties>")
+                workbook_sheets_xml = "".join(
+                    f"<sheet name=\"{escape(name, {'\"':'&quot;'})}\" sheetId=\"{idx}\" r:id=\"rId{idx}\"/>"
+                    for idx, (name, _) in enumerate(sheet_entries, start=1)
+                )
+                zf.writestr("xl/workbook.xml",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+                            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                            "<bookViews><workbookView/></bookViews>"
+                            f"<sheets>{workbook_sheets_xml}</sheets>"
+                            "</workbook>")
+                workbook_rels_xml = "".join(
+                    f"<Relationship Id=\"rId{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{idx}.xml\"/>"
+                    for idx in range(1, len(sheet_entries) + 1)
+                )
+                zf.writestr("xl/_rels/workbook.xml.rels",
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                            f"{workbook_rels_xml}"
+                            "</Relationships>")
+                for idx, (_, sheet_xml) in enumerate(sheet_entries, start=1):
+                    zf.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml)
+            buffer.seek(0); return buffer.getvalue()
 
 def _normalize_import_value(value, column: str):
-    if value is None:
-        return None
+    if value is None: return None
     if isinstance(value, str):
         value = value.strip()
-        if value == "":
-            return None
-    if pd.isna(value):
-        return None
-    if column in {"id", "student_id", "invoice_id", "aktif_mi"}:
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (float, int)) and not pd.isna(value):
-            return int(value)
+        if value == "": return None
+    if pd.isna(value): return None
+    if column in {"id","student_id","invoice_id","aktif_mi"}:
+        if isinstance(value, bool): return int(value)
+        if isinstance(value, (float,int)) and not pd.isna(value): return int(value)
         value_str = str(value).strip()
-        if value_str.isdigit():
-            return int(value_str)
-        raise ValueError(f"{column} sütunu için sayısal değer bekleniyor: {value}")
-    if column in {"tutar"}:
-        if isinstance(value, (float, int)):
-            return float(value)
-        value_str = str(value).replace(",", ".").strip()
-        return float(value_str)
-    if column in {"dogum_tarihi", "son_odeme_tarihi", "tarih", "kayit_tarihi"}:
-        if isinstance(value, (datetime, date)):
-            return value.isoformat()
-        if isinstance(value, str):
-            return value.strip()
-        raise ValueError(f"{column} sütunu için tarih değeri bekleniyor: {value}")
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
+        if value_str.isdigit(): return int(value_str)
+        raise ValueError(f"{column} için sayısal değer bekleniyor: {value}")
+    if column == "tutar":
+        if isinstance(value, (float,int)): return float(value)
+        return float(str(value).replace(",", ".").strip())
+    if column in {"dogum_tarihi","son_odeme_tarihi","tarih","kayit_tarihi"}:
+        if isinstance(value, (datetime, date)): return value.isoformat()
+        if isinstance(value, str): return value.strip()
+        raise ValueError(f"{column} için tarih bekleniyor: {value}")
+    if isinstance(value, pd.Timestamp): return value.isoformat()
     return value
 
 def _reset_stream_position(handle: Any) -> None:
     if hasattr(handle, "seek"):
-        try:
-            handle.seek(0)
-        except Exception:
-            pass
+        try: handle.seek(0)
+        except Exception: pass
 
 def _coerce_to_buffer(data_source: Any) -> io.BytesIO:
     if isinstance(data_source, (str, os.PathLike)):
-        with open(data_source, "rb") as fh:
-            return io.BytesIO(fh.read())
-    if isinstance(data_source, bytes):
-        return io.BytesIO(data_source)
+        with open(data_source, "rb") as fh: return io.BytesIO(fh.read())
+    if isinstance(data_source, bytes): return io.BytesIO(data_source)
     getvalue = getattr(data_source, "getvalue", None)
     if callable(getvalue):
-        try:
-            return io.BytesIO(getvalue())
-        except TypeError:
-            pass
+        try: return io.BytesIO(getvalue())
+        except TypeError: pass
     read = getattr(data_source, "read", None)
     if callable(read):
-        content = read()
-        _reset_stream_position(data_source)
-        return io.BytesIO(content)
+        content = read(); _reset_stream_position(data_source); return io.BytesIO(content)
     raise TypeError("Desteklenmeyen veri kaynağı")
 
 def _column_index(column_ref: str) -> int:
     result = 0
     for char in column_ref.upper():
-        if not ("A" <= char <= "Z"):
-            continue
-        result = result * 26 + (ord(char) - 64)
+        if "A" <= char <= "Z":
+            result = result * 26 + (ord(char) - 64)
     return max(result, 1)
 
 def _parse_cell_value(cell: ET.Element, namespaces: dict[str, str]) -> Any:
-    cell_type = cell.attrib.get("t")
-    value_element = cell.find("main:v", namespaces)
+    cell_type = cell.attrib.get("t"); value_element = cell.find("main:v", namespaces)
     if cell_type == "inlineStr":
         inline = cell.find("main:is", namespaces)
         text_element = inline.find("main:t", namespaces) if inline is not None else None
-        if text_element is None:
-            return None
-        return text_element.text or ""
+        return "" if text_element is None else (text_element.text or "")
     if cell_type == "b":
         raw = value_element.text if value_element is not None else "0"
-        try:
-            return bool(int(str(raw or "0")))
-        except ValueError:
-            return False
-    if value_element is None or (value_element.text or "").strip() == "":
-        return None
+        try: return bool(int(str(raw or "0")))
+        except ValueError: return False
+    if value_element is None or (value_element.text or "").strip() == "": return None
     raw_text = value_element.text or ""
     try:
         as_float = float(raw_text)
-        if as_float.is_integer():
-            return int(as_float)
-        return as_float
+        return int(as_float) if as_float.is_integer() else as_float
     except ValueError:
         return raw_text
 
 def _read_simple_xlsx(data_source: Any) -> dict[str, pd.DataFrame]:
-    buffer = _coerce_to_buffer(data_source)
-    result: dict[str, pd.DataFrame] = {}
+    buffer = _coerce_to_buffer(data_source); result: dict[str, pd.DataFrame] = {}
     with zipfile.ZipFile(buffer) as zf:
         workbook_xml = zf.read("xl/workbook.xml")
         workbook_tree = ET.fromstring(workbook_xml)
-        namespaces = {
-            "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        }
+        namespaces = {"main":"http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+                      "r":"http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
         rel_tree = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
-        rel_ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
-        relationships = {
-            rel.attrib["Id"]: rel.attrib["Target"]
-            for rel in rel_tree.findall("rel:Relationship", rel_ns)
-        }
+        rel_ns = {"rel":"http://schemas.openxmlformats.org/package/2006/relationships"}
+        relationships = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rel_tree.findall("rel:Relationship", rel_ns)}
         for sheet in workbook_tree.findall("main:sheets/main:sheet", namespaces):
             sheet_name = sheet.attrib.get("name", "Sheet")
             rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
@@ -700,37 +537,29 @@ def _read_simple_xlsx(data_source: Any) -> dict[str, pd.DataFrame]:
             target = relationships.get(rel_id)
             if not target: continue
             target_path = target.lstrip("/")
-            if not target_path.startswith("xl/"):
-                target_path = f"xl/{target_path}"
+            if not target_path.startswith("xl/"): target_path = f"xl/{target_path}"
             sheet_xml = ET.fromstring(zf.read(target_path))
             rows: list[list[Any]] = []
             for row in sheet_xml.findall("main:sheetData/main:row", namespaces):
-                row_values: list[Any] = []
-                current_col = 1
+                row_values: list[Any] = []; current_col = 1
                 for cell in row.findall("main:c", namespaces):
                     ref = cell.attrib.get("r", "")
                     match = re.match(r"([A-Za-z]+)", ref)
                     col_index = _column_index(match.group(1)) if match else current_col
                     while current_col < col_index:
-                        row_values.append(None)
-                        current_col += 1
-                    row_values.append(_parse_cell_value(cell, namespaces))
-                    current_col += 1
+                        row_values.append(None); current_col += 1
+                    row_values.append(_parse_cell_value(cell, namespaces)); current_col += 1
                 rows.append(row_values)
-            if not rows:
-                result[sheet_name] = pd.DataFrame(); continue
+            if not rows: result[sheet_name] = pd.DataFrame(); continue
             max_columns = max((len(r) for r in rows), default=0)
             for r in rows:
-                if len(r) < max_columns:
-                    r.extend([None] * (max_columns - len(r)))
+                if len(r) < max_columns: r.extend([None] * (max_columns - len(r)))
             header = [str(col).strip() if col is not None else "" for col in rows[0]]
             data_rows = []
             for row in rows[1:]:
                 row = list(row[: len(header)])
-                if len(row) < len(header):
-                    row.extend([None] * (len(header) - len(row)))
-                if any(cell not in (None, "") for cell in row):
-                    data_rows.append(row)
+                if len(row) < len(header): row.extend([None] * (len(header) - len(row)))
+                if any(cell not in (None, "") for cell in row): data_rows.append(row)
             result[sheet_name] = pd.DataFrame(data_rows, columns=header)
     return result
 
@@ -739,32 +568,25 @@ def _read_excel_workbook(uploaded_file: Any) -> dict[str, pd.DataFrame]:
         _reset_stream_position(uploaded_file)
         return pd.read_excel(uploaded_file, sheet_name=None)
     except (ModuleNotFoundError, ImportError) as exc:
-        message = str(exc)
-        if "openpyxl" not in message:
-            raise
+        if "openpyxl" not in str(exc): raise
         _reset_stream_position(uploaded_file)
         return _read_simple_xlsx(uploaded_file)
 
 def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
     processed: list[str] = []
-    conn = get_conn()
-    cursor = conn.cursor()
+    conn = get_conn(); cursor = conn.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=OFF")
         for table in TABLE_NAMES:
             columns = EXPECTED_IMPORT_COLUMNS[table]
             df = sheets.get(table)
-            if df is None:
-                continue
+            if df is None: continue
             missing = [col for col in columns if col not in df.columns]
-            if missing:
-                raise ValueError(f"{table} sayfasında eksik sütunlar: {', '.join(missing)}")
+            if missing: raise ValueError(f"{table} sayfasında eksik sütunlar: {', '.join(missing)}")
             subset = df[columns].copy()
             cursor.execute(f"DELETE FROM {table}")
-            try:
-                cursor.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
-            except sqlite3.Error:
-                pass
+            try: cursor.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+            except sqlite3.Error: pass
             if subset.empty:
                 processed.append(f"{table}: 0 satır aktarıldı"); continue
             rows = []
@@ -775,22 +597,16 @@ def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[s
                 rows.append(tuple(cleaned))
             placeholders = ",".join(["?"] * len(columns))
             column_sql = ",".join(columns)
-            cursor.executemany(
-                f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})",
-                rows,
-            )
+            cursor.executemany(f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", rows)
             processed.append(f"{table}: {len(rows)} satır aktarıldı")
         conn.commit()
     except Exception as exc:
-        conn.rollback()
-        return False, [str(exc)]
+        conn.rollback(); return False, [str(exc)]
     finally:
-        try:
-            cursor.execute("PRAGMA foreign_keys=ON")
-        except sqlite3.Error:
-            pass
+        try: cursor.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.Error: pass
         conn.close()
-    return True, processed if processed else ["Excel dosyasında beklenen sayfalar bulunamadı"]
+    return True, processed if processed else ["Excel'de beklenen sayfalar yok"]
 
 def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
     try:
@@ -801,84 +617,62 @@ def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
 
 def import_db_from_excel_path(path: str) -> tuple[bool, list[str]]:
     path = (path or "").strip()
-    if not path:
-        return False, ["Excel dosya yolu boş olamaz."]
-    if not os.path.exists(path):
-        return False, [f"Excel dosyası bulunamadı: {path}"]
-    try:
-        sheets = _read_excel_workbook(path)
-    except Exception as exc:
-        return False, [f"Excel dosyası okunamadı: {exc}"]
+    if not path: return False, ["Excel dosya yolu boş olamaz."]
+    if not os.path.exists(path): return False, [f"Excel dosyası bulunamadı: {path}"]
+    try: sheets = _read_excel_workbook(path)
+    except Exception as exc: return False, [f"Excel dosyası okunamadı: {exc}"]
     return import_db_from_frames(sheets)
 
 def import_db_from_google_sheet(sheet_id: str) -> tuple[bool, list[str]]:
     sheet_id = (sheet_id or "").strip()
+    if not sheet_id: return False, ["Google Sheet ID boş olamaz."]
     client, error = _get_gspread_client()
-    if error:
-        return False, [error]
-    try:
-        spreadsheet = client.open_by_key(sheet_id)
-    except Exception as exc:
-        return False, [f"Google Sheet açılamadı: {exc}"]
+    if error: return False, [error]
+    try: spreadsheet = client.open_by_key(sheet_id)
+    except Exception as exc: return False, [f"Google Sheet açılamadı: {exc}"]
     sheets: dict[str, pd.DataFrame] = {}
     for table in TABLE_NAMES:
-        try:
-            worksheet = spreadsheet.worksheet(table)
-        except WorksheetNotFound:
-            continue
+        try: worksheet = spreadsheet.worksheet(table)
+        except WorksheetNotFound: continue
         values = worksheet.get_all_values()
         if not values:
             sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table]); continue
         header, *rows = values
         if not header:
             sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table]); continue
-        df = pd.DataFrame(rows, columns=header)
-        df = df.replace("", pd.NA)
+        df = pd.DataFrame(rows, columns=header).replace("", pd.NA)
         sheets[table] = df
-    if not sheets:
-        return False, ["Çalışma kitabında beklenen tablo adları bulunamadı."]
+    if not sheets: return False, ["Çalışma kitabında beklenen tablo adları bulunamadı."]
     return import_db_from_frames(sheets)
 
 def export_db_to_google_sheet(sheet_id: str) -> tuple[bool, str]:
     sheet_id = (sheet_id or "").strip()
+    if not sheet_id: return False, "Google Sheet ID boş olamaz."
     client, error = _get_gspread_client()
-    if error:
-        return False, error
-    try:
-        spreadsheet = client.open_by_key(sheet_id)
-    except Exception as exc:
-        return False, f"Google Sheet açılamadı: {exc}"
+    if error: return False, error
+    try: spreadsheet = client.open_by_key(sheet_id)
+    except Exception as exc: return False, f"Google Sheet açılamadı: {exc}"
     tables = fetch_db_tables()
     for table, df in tables.items():
-        try:
-            worksheet = spreadsheet.worksheet(table)
+        try: worksheet = spreadsheet.worksheet(table)
         except WorksheetNotFound:
-            rows = max(len(df) + 1, 1)
-            cols = max(len(df.columns), 1)
+            rows = max(len(df) + 1, 1); cols = max(len(df.columns), 1)
             worksheet = spreadsheet.add_worksheet(title=table, rows=str(rows), cols=str(cols))
-        values = _df_to_gspread_values(df)
-        if not values:
-            values = [[""]]
-        row_count = len(values)
-        col_count = max((len(row) for row in values), default=1)
+        values = _df_to_gspread_values(df) or [[""]]
+        row_count = len(values); col_count = max((len(r) for r in values), default=1)
         try:
-            worksheet.clear()
-            worksheet.resize(rows=row_count, cols=col_count)
-            worksheet.update(values)
+            worksheet.clear(); worksheet.resize(rows=row_count, cols=col_count); worksheet.update(values)
         except Exception as exc:
             return False, f"{table} sayfası yazılamadı: {exc}"
     return True, "Veritabanı Google Sheets'e aktarıldı."
 
 def export_db_to_excel_file(path: str) -> tuple[bool, str]:
     path = (path or "").strip()
-    if not path:
-        return False, "Excel dosya yolu boş olamaz."
+    if not path: return False, "Excel dosya yolu boş olamaz."
     directory = os.path.dirname(path)
     if directory and not os.path.exists(directory):
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except OSError as exc:
-            return False, f"Klasör oluşturulamadı: {exc}"
+        try: os.makedirs(directory, exist_ok=True)
+        except OSError as exc: return False, f"Klasör oluşturulamadı: {exc}"
     try:
         with open(path, "wb") as fh:
             fh.write(export_db_to_excel_bytes())
@@ -886,9 +680,9 @@ def export_db_to_excel_file(path: str) -> tuple[bool, str]:
         return False, f"Excel dosyası yazılamadı: {exc}"
     return True, f"Veritabanı `{path}` dosyasına kaydedildi."
 
-# ---------------------------
+# =========================
 # WhatsApp Cloud API
-# ---------------------------
+# =========================
 def wa_headers():
     return {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
@@ -896,106 +690,76 @@ def _post_whatsapp_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{GRAPH_BASE}/{WABA_PHONE_NUMBER_ID}/messages"
     try:
         r = requests.post(url, json=payload, headers=wa_headers(), timeout=30)
-        try:
-            data = r.json() if r.content else {}
-        except ValueError:
-            data = {"raw": r.text}
+        try: data = r.json() if r.content else {}
+        except ValueError: data = {"raw": r.text}
         return {"status_code": r.status_code, "data": data}
     except requests.RequestException as exc:
         return {"status_code": None, "error": str(exc), "data": {}}
 
 def send_template(to_phone_e164: str, template_name: str, lang_code="tr", body_params: List[str] = None) -> Dict[str, Any]:
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone_e164,
-        "type": "template",
-        "template": {"name": template_name,"language": {"code": lang_code},"components": []}
-    }
+    payload = {"messaging_product":"whatsapp","to":to_phone_e164,"type":"template",
+               "template":{"name":template_name,"language":{"code":lang_code},"components":[]}}
     if body_params:
-        payload["template"]["components"].append({
-            "type": "body",
-            "parameters": [{"type": "text", "text": str(x)} for x in body_params]
-        })
+        payload["template"]["components"].append({"type":"body","parameters":[{"type":"text","text":str(x)} for x in body_params]})
     return _post_whatsapp_payload(payload)
 
 def send_text(to_phone_e164: str, text: str) -> Dict[str, Any]:
-    payload = {"messaging_product": "whatsapp","to": to_phone_e164,"type": "text","text": {"body": text}}
+    payload = {"messaging_product":"whatsapp","to":to_phone_e164,"type":"text","text":{"body":text}}
     return _post_whatsapp_payload(payload)
 
 def _response_status_label(resp: Dict[str, Any]) -> str:
     code = resp.get("status_code")
-    if isinstance(code, int) and 200 <= code < 300:
-        return "ok"
-    if resp.get("error"):
-        return "err_request"
+    if isinstance(code, int) and 200 <= code < 300: return "ok"
+    if resp.get("error"): return "err_request"
     return f"err_{code if code is not None else 'unknown'}"
 
-_WHATSAPP_ERROR_HINTS = {
-    (131030, None): ("Numara izinli alıcılar listesinde değil. "
-                     "WhatsApp Manager → Phone numbers → Allowed recipients."),
-}
+_WHATSAPP_ERROR_HINTS = {(131030, None): "Numara izinli alıcılar listesinde değil (WhatsApp Manager → Phone numbers → Allowed recipients)."}
 
 def _format_whatsapp_error(err: Dict[str, Any]) -> str | None:
     if not isinstance(err, dict): return None
     message = err.get("message"); code = err.get("code"); subcode = err.get("error_subcode")
     normalized_codes: List[tuple[int, Any]] = []
     if isinstance(code, numbers.Integral):
-        norm_code = int(code)
-        norm_subcode = int(subcode) if isinstance(subcode, numbers.Integral) else subcode
-        normalized_codes.append((norm_code, norm_subcode)); normalized_codes.append((norm_code, None))
+        norm_code = int(code); norm_sub = int(subcode) if isinstance(subcode, numbers.Integral) else subcode
+        normalized_codes += [(norm_code, norm_sub), (norm_code, None)]
     elif isinstance(code, str) and code.isdigit():
-        norm_code = int(code)
-        if isinstance(subcode, str) and subcode.isdigit():
-            normalized_codes.append((norm_code, int(subcode)))
+        norm_code = int(code); normalized_codes += [(norm_code, int(subcode))] if (isinstance(subcode, str) and subcode.isdigit()) else []
         normalized_codes.append((norm_code, None))
     for key in normalized_codes:
         hint = _WHATSAPP_ERROR_HINTS.get(key)
-        if hint:
-            if isinstance(message, str) and message.strip():
-                return f"{message.strip()} — {hint}"
-            return hint
-    if isinstance(message, str) and message.strip():
-        return message.strip()
-    for alt_key in ("error_user_msg", "error_user_title", "details", "summary"):
-        value = err.get(alt_key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if hint: return f"{message.strip()} — {hint}" if isinstance(message, str) and message.strip() else hint
+    if isinstance(message, str) and message.strip(): return message.strip()
+    for k in ("error_user_msg","error_user_title","details","summary"):
+        v = err.get(k)
+        if isinstance(v, str) and v.strip(): return v.strip()
     return None
 
 def _response_error_message(resp: Dict[str, Any]) -> str:
-    if resp.get("error"):
-        return str(resp["error"])
+    if resp.get("error"): return str(resp["error"])
     data = resp.get("data")
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict):
             formatted = _format_whatsapp_error(err)
-            if formatted:
-                return formatted
+            if formatted: return formatted
             return str(err)
-        if data:
-            return str(data)
+        if data: return str(data)
     return "Bilinmeyen hata"
 
 def log_msg(phone: str, template_name: str, msg_type: str, payload: str, status: str):
-    conn = get_conn()
-    c = conn.cursor()
+    conn = get_conn(); c = conn.cursor()
     c.execute("INSERT INTO msg_log(phone, template_name, msg_type, payload, status, ts) VALUES(?,?,?,?,?,?)",
               (phone, template_name, msg_type, payload, status, datetime.now().isoformat(timespec="seconds")))
     conn.commit(); conn.close()
 
-# ---------------------------
+# =========================
 # Data Helpers
-# ---------------------------
+# =========================
 def df_students() -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM students", conn)
-    conn.close(); return df
+    conn = get_conn(); df = pd.read_sql_query("SELECT * FROM students", conn); conn.close(); return df
 
 def df_groups() -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM groups ORDER BY ad COLLATE NOCASE ASC", conn)
-    conn.close(); return df
+    conn = get_conn(); df = pd.read_sql_query("SELECT * FROM groups ORDER BY ad COLLATE NOCASE ASC", conn); conn.close(); return df
 
 def df_invoices(join_students=True) -> pd.DataFrame:
     conn = get_conn()
@@ -1008,29 +772,25 @@ def df_invoices(join_students=True) -> pd.DataFrame:
         """
     else:
         q = "SELECT * FROM invoices ORDER BY date(son_odeme_tarihi) ASC"
-    df = pd.read_sql_query(q, conn)
-    conn.close(); return df
+    df = pd.read_sql_query(q, conn); conn.close(); return df
 
 def upsert_student(row: dict, row_id: int | None):
     conn = get_conn(); c = conn.cursor()
     if row_id:
-        c.execute(
-            """UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, kayit_tarihi=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=? WHERE id=?""",
-            (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık"),row_id)
-        )
+        c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, kayit_tarihi=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=? WHERE id=?""",
+                  (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),
+                   row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık"),row_id))
     else:
-        c.execute(
-            """INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi) VALUES(?,?,?,?,?,?,?,?,?)""",
-            (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık"))
-        )
+        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi) VALUES(?,?,?,?,?,?,?,?,?)""",
+                  (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),
+                   row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık")))
     conn.commit(); conn.close()
 
 def delete_student(row_id: int) -> bool:
     if not row_id: return False
     conn = get_conn(); c = conn.cursor()
     c.execute("DELETE FROM students WHERE id=?", (row_id,))
-    conn.commit(); deleted = c.rowcount > 0
-    conn.close(); return deleted
+    conn.commit(); deleted = c.rowcount > 0; conn.close(); return deleted
 
 def add_group(name: str):
     name = name.strip()
@@ -1057,71 +817,22 @@ def mark_paid(invoice_id: int, tutar: float):
     conn.commit(); conn.close()
 
 def compute_status_rollover():
+    """Vadesi geçen 'bekliyor' faturaları 'gecikti' yap."""
     today = date.today().isoformat()
     conn = get_conn(); c = conn.cursor()
     c.execute("""UPDATE invoices SET durum='gecikti' WHERE durum='bekliyor' AND date(son_odeme_tarihi) < date(?)""", (today,))
     conn.commit(); conn.close()
 
-def detect_data_integrity_issues(limit: int = 5) -> list[str]:
-    issues: list[str] = []
-    conn = get_conn()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT invoices.id, invoices.student_id
-            FROM invoices
-            LEFT JOIN students ON students.id = invoices.student_id
-            WHERE invoices.student_id IS NOT NULL AND students.id IS NULL
-            ORDER BY invoices.id ASC
-        """)
-        orphan_invoices = cursor.fetchall()
-        if orphan_invoices:
-            sample = ", ".join(f"#{row[0]} (öğrenci {row[1]})" for row in orphan_invoices[:limit])
-            if len(orphan_invoices) > limit: sample += " …"
-            issues.append(f"{len(orphan_invoices)} fatura kayıtlı olmayan öğrenciye bağlı: {sample}")
-
-        cursor.execute("""
-            SELECT payments.id, payments.invoice_id
-            FROM payments
-            LEFT JOIN invoices ON invoices.id = payments.invoice_id
-            WHERE payments.invoice_id IS NOT NULL AND invoices.id IS NULL
-            ORDER BY payments.id ASC
-        """)
-        orphan_payments = cursor.fetchall()
-        if orphan_payments:
-            sample = ", ".join(f"#{row[0]} (fatura {row[1]})" for row in orphan_payments[:limit])
-            if len(orphan_payments) > limit: sample += " …"
-            issues.append(f"{len(orphan_payments)} ödeme var ama ilişkili fatura bulunamadı: {sample}")
-
-        cursor.execute("""
-            SELECT student_id, donem, COUNT(*)
-            FROM invoices
-            WHERE student_id IS NOT NULL AND donem IS NOT NULL AND TRIM(donem) <> ''
-            GROUP BY student_id, donem
-            HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC
-        """)
-        duplicate_invoices = cursor.fetchall()
-        if duplicate_invoices:
-            sample = ", ".join(f"öğrenci {row[0]} • dönem {row[1]} ({row[2]} adet)" for row in duplicate_invoices[:limit])
-            if len(duplicate_invoices) > limit: sample += " …"
-            issues.append("Aynı öğrenci ve dönem için birden fazla fatura var: " + sample)
-    finally:
-        conn.close()
-    return issues
-
-# ---------------------------
+# =========================
 # UI — Sidebar
-# ---------------------------
+# =========================
 sidebar = st.sidebar
 sidebar.title("⚽ Futbol Okulu")
 sidebar.caption("Ödeme Takip + WhatsApp")
 sidebar.markdown("---")
 
 sidebar.markdown("### 📋 Menü")
-MENU_OPTIONS = [
-    "📊 Pano","👨‍👩‍👧‍👦 Öğrenciler","🧾 Faturalar","📲 WhatsApp Gönder","🧾 Log","🎉 Özel Günler",
-]
+MENU_OPTIONS = ["📊 Pano","👨‍👩‍👧‍👦 Öğrenciler","🧾 Faturalar","📲 WhatsApp Gönder","🧾 Log","🎉 Özel Günler"]
 selected_menu = sidebar.radio("Sayfayı seçin", options=MENU_OPTIONS, index=0, key="navigation_menu")
 
 excel_bytes = export_db_to_excel_bytes()
@@ -1134,7 +845,7 @@ sidebar.download_button(
     help="Tüm tablo verilerini Excel formatında indir.",
 )
 
-# (YENİ) Sheet1 wide Excel içe aktarma kısayolu
+# Sheet1 wide Excel içe aktarma kısayolu
 sidebar.markdown("#### 📥 Excel (Sheet1 wide) içe aktar")
 excel_path_input = sidebar.text_input(
     "Yerel Excel yolu",
@@ -1149,6 +860,7 @@ if sidebar.button("Sheet1 → students + invoices aktar", use_container_width=Tr
     else:
         sidebar.error("Hata:\n" + "\n".join(f"- {m}" for m in msgs))
 
+# Yerel Excel senkronizasyonu (tablo-tablo)
 sidebar.markdown("#### 💾 Yerel Excel Senkronizasyonu (tablo-tablo)")
 local_excel_path = sidebar.text_input(
     "Excel dosya yolu",
@@ -1159,18 +871,21 @@ st.session_state.local_excel_path = local_excel_path
 col_local_export, col_local_import = sidebar.columns(2)
 if col_local_export.button("📤 Dosyaya Kaydet", use_container_width=True):
     success, message = export_db_to_excel_file(local_excel_path)
-    sidebar.success(message) if success else sidebar.error(message)
+    if success:
+        sidebar.success(message)
+    else:
+        sidebar.error(message)
 if col_local_import.button("📥 Dosyadan Al", use_container_width=True):
     success, messages = import_db_from_excel_path(local_excel_path)
     status = "success" if success else "error"
-    st.session_state["import_feedback"] = (status, messages)
-    st.rerun()
-import_feedback = st.session_state.pop("import_feedback", None)
-if import_feedback:
-    status, messages = import_feedback
     msg_text = "\n".join(messages)
-    sidebar.success(msg_text) if status == "success" else sidebar.error(msg_text)
+    if status == "success":
+        sidebar.success(msg_text)
+    else:
+        sidebar.error(msg_text)
+    st.rerun()
 
+# Google Sheets senkronizasyonu
 sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
 sheet_id_text = sidebar.text_input(
     "Google Sheets ID",
@@ -1181,58 +896,74 @@ sheet_id_input = sheet_id_text.strip()
 if sheet_id_input != st.session_state.get("google_sheet_id", ""):
     st.session_state.google_sheet_id = sheet_id_input
 st.session_state.google_sheet_id_input = sheet_id_input
+
 col_gs_export, col_gs_import = sidebar.columns(2)
 export_clicked = col_gs_export.button("📤 Sheets'e Yedekle", use_container_width=True, disabled=not sheet_id_input)
 import_clicked = col_gs_import.button("📥 Sheets'ten İçe Aktar", use_container_width=True, disabled=not sheet_id_input)
+
 if export_clicked:
     success, message = export_db_to_google_sheet(sheet_id_input)
-    sidebar.success(message) if success else sidebar.error(message)
+    if success:
+        sidebar.success(message)
+    else:
+        sidebar.error(message)
+
 if import_clicked:
     success, messages = import_db_from_google_sheet(sheet_id_input)
     status = "success" if success else "error"
-    st.session_state["import_feedback"] = (status, messages)
+    msg_text = "\n".join(messages)
+    if status == "success":
+        sidebar.success(msg_text)
+    else:
+        sidebar.error(msg_text)
     st.rerun()
 
-# ---------------------------
+# =========================
 # UI — Sections
-# ---------------------------
+# =========================
 if selected_menu == "📊 Pano":
+    compute_status_rollover()  # <-- vadesi geçenleri 'gecikti' yap
     st.header("📊 Pano")
     df_inv = df_invoices()
     today = date.today()
     this_week_end = today + timedelta(days=7)
+
     due_soon = df_inv[
         (pd.to_datetime(df_inv["son_odeme_tarihi"]) >= pd.to_datetime(today)) &
         (pd.to_datetime(df_inv["son_odeme_tarihi"]) <= pd.to_datetime(this_week_end)) &
         (df_inv["durum"] == "bekliyor")
     ]
     overdue = df_inv[df_inv["durum"] == "gecikti"]
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Bu Hafta Vadesi Dolan", len(due_soon))
     c2.metric("Geciken Fatura", len(overdue))
     c3.metric("Toplam Bekleyen", int((df_inv["durum"] == "bekliyor").sum()))
-    st.subheader("Bu Hafta Vade"); st.dataframe(due_soon, use_container_width=True)
-    st.subheader("Gecikenler"); st.dataframe(overdue, use_container_width=True)
+
+    st.subheader("Bu Hafta Vade")
+    st.dataframe(due_soon, use_container_width=True)
+    st.subheader("Gecikenler")
+    st.dataframe(overdue, use_container_width=True)
 
 elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
     st.header("👨‍👩‍👧‍👦 Öğrenciler")
-    group_success = st.session_state.pop("group_success", None)
-    if group_success: st.success(group_success)
-    student_success = st.session_state.pop("student_success", None)
-    if student_success: st.success(student_success)
 
-    df = df_students(); st.dataframe(df, use_container_width=True)
+    df = df_students()
+    st.dataframe(df, use_container_width=True)
 
     st.markdown("### Gruplar")
     df_g = df_groups()
-    st.dataframe(df_g, use_container_width=True) if not df_g.empty else st.info("Henüz grup eklenmedi.")
+    if df_g.empty:
+        st.info("Henüz grup eklenmedi. Aşağıdaki formu kullanarak yeni gruplar oluşturabilirsiniz.")
+    else:
+        st.dataframe(df_g, use_container_width=True)
 
     with st.form("group_form"):
         new_group = st.text_input("Yeni Grup Adı")
         group_submitted = st.form_submit_button("Grup Ekle")
         if group_submitted:
             if add_group(new_group):
-                st.session_state["group_success"] = "Grup eklendi. Liste yenilendi."
+                st.success("Grup eklendi. Liste yenilendi.")
                 st.rerun()
             else:
                 st.warning("Grup adı boş olamaz veya zaten mevcut.")
@@ -1243,11 +974,13 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
     for row in student_records:
         label = f"#{int(row['id'])} • {str(row.get('ad') or '').strip()} {str(row.get('soyad') or '').strip()}"
         select_options[label] = row
+
     select_labels = list(select_options.keys())
     if "student_select_label" not in st.session_state:
         st.session_state.student_select_label = select_labels[0]
     elif st.session_state.student_select_label not in select_labels:
         st.session_state.student_select_label = select_labels[0]
+
     selected_label = st.selectbox("ID (güncellemek için seçin)", options=select_labels, key="student_select_label")
     selected_student = select_options.get(selected_label)
     row_id = int(selected_student["id"]) if selected_student and selected_student.get("id") else 0
@@ -1257,6 +990,7 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
     soyad_default = str(selected_student.get("soyad", "")) if selected_student else ""
     veli_ad_default = str(selected_student.get("veli_ad", "")) if selected_student else ""
     veli_tel_default = str(selected_student.get("veli_tel", "")) if selected_student else ""
+
     group_names = df_g["ad"].tolist()
     if group_names:
         takim_default = str(selected_student.get("takim", "") or "") if selected_student else ""
@@ -1288,8 +1022,7 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
 
     aktif_default = True
     if selected_student:
-        aktif_val = selected_student.get("aktif_mi", 1)
-        try: aktif_default = bool(int(aktif_val))
+        try: aktif_default = bool(int(selected_student.get("aktif_mi", 1)))
         except (TypeError, ValueError): aktif_default = True
 
     uye_options = ["Aylık", "3 Aylık", "6 Aylık", "Senelik"]
@@ -1313,10 +1046,12 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
 
     with st.form("student_form"):
         st.number_input("Seçilen Öğrenci ID", min_value=0, step=1, value=row_id, disabled=True)
+
         ad = st.text_input("Ad", value=ad_default, key=f"student_form_ad_{key_suffix}")
         soyad = st.text_input("Soyad", value=soyad_default, key=f"student_form_soyad_{key_suffix}")
         veli_ad = st.text_input("Veli Adı", value=veli_ad_default, key=f"student_form_veli_ad_{key_suffix}")
         veli_tel = st.text_input("Veli Telefonu (+90...)", value=veli_tel_default, key=f"student_form_veli_tel_{key_suffix}")
+
         if group_names:
             takim = st.selectbox("Grup Seçin", options=takim_options, index=takim_index,
                                  format_func=lambda x: "— Grup seçin —" if x == "" else x,
@@ -1324,20 +1059,22 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
         else:
             takim = st.text_input("Grup (önce yukarıdan grup ekleyin)",
                                   value=takim_default, key=f"student_form_takim_text_{key_suffix}")
+
         kayit = st.date_input("Kayıt Tarihi", value=default_kayit, key=f"student_form_kayit_{key_suffix}")
         dogum = st.date_input("Doğum Tarihi", value=default_dogum, key=f"student_form_dogum_{key_suffix}")
         aktif = st.checkbox("Aktif", value=aktif_default, key=f"student_form_aktif_{key_suffix}")
         uye_tipi = st.selectbox("Üyelik Süresi", options=uye_options, index=uye_index, key=f"student_form_uye_tipi_{key_suffix}")
+
         submitted = st.form_submit_button("Kaydet")
 
         pending_key = "pending_delete_student"
         if pending_key in st.session_state:
-            if int(st.session_state[pending_key]) <= 0 or int(row_id) <= 0:
+            if int(st.session_state[pending_key]) <= 0 or int(row_id) <= 0 or st.session_state[pending_key] != int(row_id):
                 st.session_state.pop(pending_key, None)
-            elif st.session_state[pending_key] != int(row_id):
-                st.session_state.pop(pending_key, None)
+
         pending_for = st.session_state.get(pending_key)
         show_confirm = pending_for and int(row_id) > 0 and pending_for == int(row_id)
+
         if show_confirm:
             st.warning("Seçili öğrenciyi silmek istediğinizden emin misiniz?", icon="⚠️")
             confirm_delete = st.form_submit_button("Evet, Sil", type="primary")
@@ -1346,7 +1083,7 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
                 if delete_student(int(row_id)):
                     st.session_state.pop(pending_key, None)
                     st.session_state.pop("student_form_prev_label", None)
-                    st.session_state["student_success"] = "Öğrenci kaydı silindi. Liste yenilendi."
+                    st.success("Öğrenci kaydı silindi. Liste yenilendi.")
                     st.rerun()
                 else:
                     st.warning("Belirtilen ID ile öğrenci bulunamadı.")
@@ -1373,19 +1110,14 @@ elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
                 "aktif_mi": 1 if aktif else 0
             }
             upsert_student(payload, row_id if row_id>0 else None)
-            st.session_state["student_success"] = "Öğrenci kaydı kaydedildi. Liste yenilendi."
+            st.success("Öğrenci kaydı kaydedildi. Liste yenilendi.")
             st.rerun()
-        if submitted and pending_key in st.session_state:
-            st.session_state.pop(pending_key, None)
 
 elif selected_menu == "🧾 Faturalar":
     st.header("🧾 Faturalar")
-    invoice_success = st.session_state.pop("invoice_success", None)
-    if invoice_success: st.success(invoice_success)
-    payment_success = st.session_state.pop("payment_success", None)
-    if payment_success: st.success(payment_success)
 
-    df = df_invoices(); st.dataframe(df, use_container_width=True)
+    df = df_invoices()
+    st.dataframe(df, use_container_width=True)
 
     st.markdown("### Fatura Ekle")
     colA, colB, colC, colD = st.columns(4)
@@ -1399,7 +1131,7 @@ elif selected_menu == "🧾 Faturalar":
         vade = st.date_input("Son Ödeme Tarihi", value=date.today())
     if st.button("Fatura Oluştur"):
         add_invoice(student_id, donem, tutar, vade.isoformat())
-        st.session_state["invoice_success"] = "Fatura eklendi. Liste yenilendi."
+        st.success("Fatura eklendi. Liste yenilendi.")
         st.rerun()
 
     st.markdown("### Ödeme Al")
@@ -1410,22 +1142,24 @@ elif selected_menu == "🧾 Faturalar":
         odeme_tutar = st.number_input("Ödenen Tutar", min_value=0.0, step=50.0)
     if st.button("Ödendi İşaretle"):
         mark_paid(inv_id, odeme_tutar)
-        st.session_state["payment_success"] = "Fatura ödendi olarak işaretlendi. Liste yenilendi."
+        st.success("Fatura ödendi olarak işaretlendi. Liste yenilendi.")
         st.rerun()
 
 elif selected_menu == "📲 WhatsApp Gönder":
     st.header("📲 WhatsApp Gönder")
+
     df = df_invoices()
     overdue = df[(df["durum"] == "gecikti") & df["veli_tel"].notna()].copy()
     if overdue.empty:
         st.info("Vadesi geçen aidat bulunmuyor.")
         st.session_state.whatsapp_overdue_selected = set()
-        st.session_state.select_all_overdue = False
     else:
         if "whatsapp_overdue_selected" not in st.session_state:
             st.session_state.whatsapp_overdue_selected = set()
+
         current_ids = set(int(x) for x in overdue["id"].tolist())
         st.session_state.whatsapp_overdue_selected = {sid for sid in st.session_state.whatsapp_overdue_selected if sid in current_ids}
+
         all_selected = (len(st.session_state.whatsapp_overdue_selected) == len(current_ids) and len(current_ids) > 0)
         select_all = st.checkbox("Tümünü Seç", value=all_selected, key="select_all_overdue")
         if select_all and not all_selected:
@@ -1446,12 +1180,14 @@ elif selected_menu == "📲 WhatsApp Gönder":
                 "Seç": st.column_config.CheckboxColumn("Seç", default=False),
                 "Tutar": st.column_config.NumberColumn("Tutar", format="%d TL"),
             },
-            hide_index=True, disabled=["Fatura ID","Ad","Soyad","Dönem","Tutar","Son Ödeme Tarihi","Veli Telefonu"],
-            use_container_width=True, key="overdue_editor",
+            hide_index=True,
+            disabled=["Fatura ID","Ad","Soyad","Dönem","Tutar","Son Ödeme Tarihi","Veli Telefonu"],
+            use_container_width=True,
+            key="overdue_editor",
         )
+
         selected_ids = [int(row["Fatura ID"]) for _, row in edited_df.iterrows() if bool(row.get("Seç"))]
         st.session_state.whatsapp_overdue_selected = set(selected_ids)
-        st.session_state.select_all_overdue = (len(selected_ids) == len(current_ids) and len(current_ids) > 0)
 
         message_text = "Sayın velimiz Lütfen geciken ödemenizi en kısa sürede yapınız."
         st.markdown(f"**Gönderilecek Mesaj:** {message_text}")
@@ -1461,27 +1197,30 @@ elif selected_menu == "📲 WhatsApp Gönder":
                 st.error("WhatsApp ayarları eksik (token / phone number id).")
             else:
                 if not selected_ids:
-                    st.warning("Lütfen mesaj göndermek için listeden en az bir veli seçin."); st.stop()
-                phones = [
-                    str(x).strip()
-                    for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
-                    if pd.notna(x) and str(x).strip()
-                ]
-                if not phones:
-                    st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı."); st.stop()
-                sent = failed = 0; error_msgs: List[str] = []
-                for phone in phones:
-                    resp = send_text(phone, message_text)
-                    status = _response_status_label(resp)
-                    log_msg(phone, "-", "text", message_text, status)
-                    if status == "ok": sent += 1
+                    st.warning("Lütfen mesaj göndermek için listeden en az bir veli seçin.")
+                else:
+                    phones = [
+                        str(x).strip()
+                        for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
+                        if pd.notna(x) and str(x).strip()
+                    ]
+                    if not phones:
+                        st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı.")
                     else:
-                        failed += 1
-                        error_msgs.append(f"{phone}: {_response_error_message(resp)}")
-                    time.sleep(1)
-                st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-                if error_msgs:
-                    st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
+                        sent = failed = 0; error_msgs: List[str] = []
+                        for phone in phones:
+                            resp = send_text(phone, message_text)
+                            status = _response_status_label(resp)
+                            log_msg(phone, "-", "text", message_text, status)
+                            if status == "ok":
+                                sent += 1
+                            else:
+                                failed += 1
+                                error_msgs.append(f"{phone}: {_response_error_message(resp)}")
+                            time.sleep(1)
+                        st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+                        if error_msgs:
+                            st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
 
 elif selected_menu == "🧾 Log":
     st.header("🧾 Mesaj Kayıtları")
@@ -1514,18 +1253,20 @@ elif selected_menu == "🎉 Özel Günler":
             st.error("WhatsApp ayarları eksik (token / phone number id).")
         else:
             if not bday_phones:
-                st.error("Gönderilecek veli telefonu bulunamadı."); st.stop()
-            sent = failed = 0; error_msgs: List[str] = []
-            for p in bday_phones:
-                if not p: continue
-                resp = send_text(p, bmsg)
-                status = _response_status_label(resp)
-                log_msg(p, "-", "text", bmsg, status)
-                if status=="ok": sent += 1
-                else:
-                    failed += 1
-                    error_msgs.append(f"{p}: {_response_error_message(resp)}")
-                time.sleep(1)
-            st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-            if error_msgs:
-                st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
+                st.error("Gönderilecek veli telefonu bulunamadı.")
+            else:
+                sent = failed = 0; error_msgs: List[str] = []
+                for p in bday_phones:
+                    if not p: continue
+                    resp = send_text(p, bmsg)
+                    status = _response_status_label(resp)
+                    log_msg(p, "-", "text", bmsg, status)
+                    if status=="ok":
+                        sent += 1
+                    else:
+                        failed += 1
+                        error_msgs.append(f"{p}: {_response_error_message(resp)}")
+                    time.sleep(1)
+                st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
+                if error_msgs:
+                    st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
