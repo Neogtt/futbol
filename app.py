@@ -396,9 +396,9 @@ def export_db_to_excel_bytes() -> bytes:
                 )
                 sheet_entries.append((sheet_name, sheet_xml))
 
-             def _escape_sheet_attr(value: str) -> str:
+            def _escape_sheet_attr(value: str) -> str:
                 # XML öznitelikleri için çift tırnak kaçışı
-                return escape(value, {'"': '&quot;'})           
+                return escape(value, {'"': '&quot;'})     
 
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr(
