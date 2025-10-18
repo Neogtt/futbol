@@ -299,7 +299,11 @@ def fetch_db_tables() -> dict[str, pd.DataFrame]:
         conn.close()
 
 EXCEL_MAX_ROWS = 1_048_576
-
+# Header satırı da sayıldığı için Excel sayfasına yazılabilecek maksimum
+# veri satırı sayısı sınırdan bir eksik olmalı. Aksi hâlde 1_048_576 kayıt
+# içeren bir tablo yazılırken başlık satırıyla birlikte sınır aşılır ve
+# "Row numbers must be between 1 and 1048576" hatası alınır.
+EXCEL_MAX_DATA_ROWS = max(1, EXCEL_MAX_ROWS - 1)
 
 def _sanitize_excel_sheet_name(name: str, position: int, used: set[str]) -> str:
     invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
@@ -375,8 +379,10 @@ def export_db_to_excel_bytes() -> bytes:
             if total_rows == 0:
                 boundaries = [(0, 0)]
             else:
-                boundaries = [(start, min(start + EXCEL_MAX_ROWS, total_rows))
-                              for start in range(0, total_rows, EXCEL_MAX_ROWS)]
+                boundaries = [
+                    (start, min(start + EXCEL_MAX_DATA_ROWS, total_rows))
+                    for start in range(0, total_rows, EXCEL_MAX_DATA_ROWS)
+                ]
 
             for chunk_idx, (start, end) in enumerate(boundaries):
                 position += 1
