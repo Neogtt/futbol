@@ -1,1373 +1,842 @@
-from __future__ import annotations
+"""
+FUTBOL OKULU — Streamlit (Py3.8+) — OTOMATIK BAŞLIK TESPİTİ
+-----------------------------------------------------------
+• Sayfanın adı ne olursa olsun çalışır (örn. 'students').
+• Başlık satırı ilk satır değilse otomatik tespit eder (ilk 30 satırı tarar).
+• Türkçe karakter/boşluk normalize + geniş alias + header tespiti → Öğrenci Listesi dolar.
+• Üyelik kodları: 0=Kontenjan, 1=1 Aylık, 2=3 Aylık, 3=6 Aylık, 4=12 Aylık.
+"""
 
-import os, time, sqlite3, requests, io, zipfile, json, re, numbers
-from datetime import datetime, date, timedelta
-from typing import List, Dict, Any, TYPE_CHECKING, IO, Iterator
-from xml.sax.saxutils import escape
-from xml.etree import ElementTree as ET
+import io
+from datetime import date
+import datetime as dt
+from typing import Tuple, Optional, List
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
-# =========================
-# Sheet1 'wide' Excel -> DB
-# =========================
-def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[bytes], sheet_name: str = "Sheet1") -> tuple[bool, list[str]]:
-    """BRK, ADI SOYADI, D.T, GRUP ADI, BABA TEL, ANNE TEL + ay kolonlarını students/invoices'a yazar."""
-    display_name = getattr(path_or_buffer, "name", "yüklenen dosya")
-    source: str | IO[bytes]
-    if isinstance(path_or_buffer, (str, os.PathLike)):
-        fs_path = os.fspath(path_or_buffer)
-        display_name = fs_path
-        if not os.path.exists(fs_path):
-            return False, [f"Excel dosyası bulunamadı: {fs_path}"]
-        source = fs_path
-    else:
-        source = path_or_buffer
+
+# ==========================
+# Normalizasyon
+# ==========================
+
+TR_MAP = str.maketrans({
+    "Ç":"c","ç":"c","Ğ":"g","ğ":"g","İ":"i","I":"i","ı":"i","Ö":"o","ö":"o","Ş":"s","ş":"s","Ü":"u","ü":"u"
+})
+
+def norm_key(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip().translate(TR_MAP).lower()
+    for ch in ["-", ".", "/", "\\", "|"]:
+        s = s.replace(ch, " ")
+    s = s.replace("_", " ")
+    s = " ".join(s.split())
+    return s
+
+def resolve_membership_status(value) -> str:
+    if pd.isna(value):
+        return "Pasif"
+
+    numeric_value: Optional[int] = None
+
+    if isinstance(value, bool):
+        return "Aktif" if value else "Pasif"
+
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        numeric_value = int(value)
+    elif isinstance(value, str):
+        nk = norm_key(value)
+        if "dondur" in nk:
+            return "Dondurmuş"
+        if any(word in nk for word in ["pasif", "inaktif", "iptal", "ayril"]):
+            return "Pasif"
+        if any(word in nk for word in ["aktif", "true", "evet", "var"]):
+            return "Aktif"
         try:
-            path_or_buffer.seek(0)
-        except (AttributeError, io.UnsupportedOperation):
-            pass    
-    try:
-        raw = pd.read_excel(source, sheet_name=sheet_name, dtype=str).fillna("")
-    except Exception as exc:
-        return False, [f"Excel okunamadı ({sheet_name} - {display_name}): {exc}"]
+            numeric_value = int(float(nk.replace(",", ".")))
+        except ValueError:
+            numeric_value = None
 
-    df = raw.copy()
-    df.columns = (df.columns
-                  .str.strip()
-                  .str.upper()
-                  .str.replace(r"[\s\.]+", "_", regex=True)
-                  .str.replace(r"__+", "_", regex=True)
-                  .str.strip("_"))
+    if numeric_value is not None:
+        if numeric_value in {2, 3}:
+            return "Dondurmuş"
+        return "Aktif" if numeric_value != 0 else "Pasif"
 
-    core_cols = ["BRK","ADI_SOYADI","D_T","GRUP_ADI","BABA_TEL","ANNE_TEL","KAYIT_TARIHI",
-                 "ÜYELİK_TERCİHİ","ÜYELİK_YENİLEME_TARIHİ"]
+    return "Aktif" if bool(value) else "Pasif"
 
-    # bazı id sütunları Excel'de bulunmayabiliyor; melt işlemi için eksikleri ekle
-    for col in core_cols:
-        if col not in df.columns:
-            df[col] = ""
+BASE_COLS = [
+    "ID","AdSoyad","DogumTarihi","VeliAdSoyad","Telefon",
+    "Grup","Seviye","Koc","Baslangic","UcretAylik","SonOdeme","Aktif","AktifDurumu",
+    "UyelikTercihi","UyelikGunTercihi","UyelikYenilemeTercihi"
+]
 
-    month_cols = [c for c in df.columns if c not in core_cols]
-
-    def pick_phone(row: pd.Series) -> str:
-        p = row.get("BABA_TEL","") or row.get("ANNE_TEL","")
-        p = str(p).strip().replace(" ", "").replace("-", "")
-        if p.startswith("0"): p = "+9" + p
-        elif p.startswith("90"): p = "+" + p
-        elif not p.startswith("+") and len(p) >= 10: p = "+90" + p[-10:]
-        return p
-
-    students = pd.DataFrame({
-        "ad": df["ADI_SOYADI"].str.strip(),
-        "soyad": "",
-        "veli_ad": "",
-        "veli_tel": df.apply(pick_phone, axis=1),
-        "takim": df["GRUP_ADI"].str.strip(),
-        "dogum_tarihi": pd.to_datetime(df["D_T"], errors="coerce").dt.date.astype(str),
-        "aktif_mi": 1
-    })
-
-    melted = df.melt(id_vars=core_cols, value_vars=month_cols,
-                     var_name="AYKOL", value_name="ODEME_DURUM")
-
-    TR_MONTHS = {"OCA":1,"OCAK":1,"ŞUBAT":2,"SUBAT":2,"ŞUB":2,"MART":3,"NISAN":4,"NİSAN":4,
-                 "MAYIS":5,"HAZIRAN":6,"TEMMUZ":7,"AGUSTOS":8,"AĞUSTOS":8,"EYLÜL":9,"EYLUL":9,
-                 "EKIM":10,"EKİM":10,"KASIM":11,"ARALIK":12}
-
-    import calendar
-    def parse_month_year(colname: str | float | int | None) -> tuple[int,int]:
-        if colname is None or (isinstance(colname, float) and pd.isna(colname)):
-            text = ""
-        elif isinstance(colname, (int, float)):
-            if isinstance(colname, float) and colname.is_integer():
-                text = str(int(colname))
-            else:
-                text = str(colname)
-        else:
-            text = str(colname)
-        c = text.upper().replace(".", "").replace("İ","I").replace("Ğ","G").replace("Ü","U").replace("Ş","S").replace("Ç","C")
-        m = re.search(r"(\d{2})$", c)
-        if m:
-            yy = int(m.group(1)); year = 2000 + yy
-            name = re.sub(r"\d{2}$","", c).strip("_")
-        else:
-            year = 2025; name = c
-        name = name.replace("_","").strip()
-        if   name.startswith("OCA"): mo=1
-        elif name.startswith(("SUB","S")): mo=2
-        elif name.startswith("MAR"): mo=3
-        elif name.startswith("NIS"): mo=4
-        elif name.startswith("MAY"): mo=5
-        elif name.startswith("HAZ"): mo=6
-        elif name.startswith("TEM"): mo=7
-        elif name.startswith(("AGU","AG")): mo=8
-        elif name.startswith("EYL"): mo=9
-        elif name.startswith(("EKI","EK")): mo=10
-        elif name.startswith("KAS"): mo=11
-        elif name.startswith("ARA"): mo=12
-        else: mo = TR_MONTHS.get(name, 1)
-        return year, mo
-
-    melted[["year","month"]] = melted["AYKOL"].apply(lambda x: pd.Series(parse_month_year(x)))
-
-    def normalize_status(val: str) -> tuple[str, float]:
-        t = str(val).strip().upper()
-        if t in {"", "HAYIR", "YOK", "0", "FALSE", "NAN"}:
-            return ("bekliyor", 0.0)
-        try:
-            amount = float(t.replace(",", "."))
-            if amount > 0: return ("odendi", amount)
-        except: pass
-        return ("odendi", 0.0)
-
-    norm = melted["ODEME_DURUM"].apply(normalize_status)
-    melted["durum"]  = norm.apply(lambda x: x[0])
-    melted["tutar"]  = norm.apply(lambda x: x[1])
-
-    def due_date(y, m):
-        last_day = calendar.monthrange(y, m)[1]
-        return date(y, m, last_day).isoformat()
-
-    melted["son_odeme_tarihi"] = [due_date(y, m) for y,m in zip(melted["year"], melted["month"])]
-
-    conn = sqlite3.connect("futbol_okulu.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ad TEXT, soyad TEXT, veli_ad TEXT, veli_tel TEXT,
-        takim TEXT, kayit_tarihi TEXT, dogum_tarihi TEXT,
-        aktif_mi INTEGER DEFAULT 1, uye_tipi TEXT DEFAULT 'Aylık'
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS invoices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER, donem TEXT, tutar REAL,
-        son_odeme_tarihi TEXT, durum TEXT DEFAULT 'bekliyor',
-        FOREIGN KEY(student_id) REFERENCES students(id)
-    )""")
-    conn.commit()
-
-    # a) grup kayıtlarını güncelle
-    unique_groups = sorted({str(g).strip() for g in df["GRUP_ADI"].tolist() if str(g).strip()})
-    if unique_groups:
-        c.executemany("INSERT OR IGNORE INTO groups(ad) VALUES(?)", ((g,) for g in unique_groups))
-        conn.commit()
-
-    # b) öğrencileri ekle
-    for _, r in students.iterrows():
-        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi)
-                     VALUES(?,?,?,?,?,?,?,?,?)""",
-                  (r["ad"], r["soyad"], "", r["veli_tel"], r["takim"], None, r["dogum_tarihi"], int(r["aktif_mi"]), "Aylık"))
-    conn.commit()
-
-    # c) id eşlemesi ve faturalar
-    students_db = pd.read_sql_query("SELECT id, ad, takim FROM students", conn)
-    merged2 = melted.merge(students_db, left_on=["ADI_SOYADI","GRUP_ADI"], right_on=["ad","takim"], how="left")
-
-    inserted = 0
-    for _, r in merged2.iterrows():
-        sid = r.get("id")
-        if pd.isna(sid): continue
-        donem = f"{int(r['year'])}-{int(r['month']):02d}"
-        c.execute("""INSERT INTO invoices(student_id, donem, tutar, son_odeme_tarihi, durum)
-                     VALUES(?,?,?,?,?)""",
-                  (int(sid), donem, float(r["tutar"] or 0.0), r["son_odeme_tarihi"], r["durum"]))
-        inserted += 1
-
-    conn.commit(); conn.close()
-    return True, [f"Öğrenci sayısı: {len(students)}", f"Fatura kaydı: {inserted}"]
-
-# =========================
-# Opsiyonel Streamlit Secrets tipi
-# =========================
-try:
-    from streamlit.runtime.secrets import StreamlitSecretNotFoundError
-except Exception:
-    class StreamlitSecretNotFoundError(Exception): pass
-
-# =========================
-# Google Sheets yardımcıları
-# =========================
-try:
-    from google.oauth2.service_account import Credentials as GoogleCredentials
-except ImportError:
-    GoogleCredentials = None
-
-try:
-    import gspread
-except ImportError:
-    gspread = None
-
-if TYPE_CHECKING:
-    import gspread as gspread_types
-
-try:
-    from gspread import WorksheetNotFound
-except (ImportError, ModuleNotFoundError):
-    class WorksheetNotFound(Exception): pass
-
-# =========================
-# Config & Secrets
-# =========================
-st.set_page_config(page_title="Futbol Okulu • Tahsilat & WhatsApp", layout="wide")
-
-def _get_secret(name: str, default: str = "") -> str:
-    try:
-        return st.secrets[name]
-    except (KeyError, FileNotFoundError, StreamlitSecretNotFoundError):
-        return os.getenv(name, default)
-
-WHATSAPP_TOKEN = _get_secret("WHATSAPP_TOKEN")
-WABA_PHONE_NUMBER_ID = _get_secret("WABA_PHONE_NUMBER_ID")
-GRAPH_BASE = "https://graph.facebook.com/v20.0"
-
-DEFAULT_DB_PATH = "futbol_okulu.db"
-DEFAULT_GOOGLE_SHEET_ID = _get_secret("GOOGLE_SHEET_ID", "") or "17-vOIoebsR7W7Bp83tbKZ7QOoC3oeUJ8"
-
-TABLE_NAMES = ["students", "groups", "invoices", "payments", "msg_log"]
-
-EXPECTED_IMPORT_COLUMNS: dict[str, list[str]] = {
-    "students": ["id","ad","soyad","veli_ad","veli_tel","takim","kayit_tarihi","dogum_tarihi","aktif_mi","uye_tipi"],
-    "groups": ["id", "ad"],
-    "invoices": ["id","student_id","donem","tutar","son_odeme_tarihi","durum"],
-    "payments": ["id","invoice_id","tarih","tutar","aciklama"],
-    "msg_log": ["id","phone","template_name","msg_type","payload","status","ts"],
+ALIAS_MAP = {
+    "id": "ID",
+    "adi soyadi": "AdSoyad", "ad soyad": "AdSoyad", "adi": "AdSoyad",
+    "dogumt": "DogumTarihi", "dogum t": "DogumTarihi", "dogum tarihi": "DogumTarihi", "dogumtarihi": "DogumTarihi",
+    "veliadsoyad": "VeliAdSoyad", "veli ad soyad": "VeliAdSoyad", "veliad": "VeliAdSoyad", "veliadsoy": "VeliAdSoyad",
+    "telefon": "Telefon", "tel": "Telefon",
+    "grup": "Grup",
+    "seviye": "Seviye",
+    "koc": "Koc", "koç": "Koc",
+    "kayit tarihi": "Baslangic", "kayittarihi": "Baslangic", "kayıt tarihi": "Baslangic", "kayıttarihi": "Baslangic",
+    "ucret aylik": "UcretAylik", "ucretaylik": "UcretAylik",
+    "son odeme": "SonOdeme", "sonodeme": "SonOdeme",
+    "aktif": "Aktif",
+    "uyeliktercihi": "UyelikTercihi", "uyelik tercihi": "UyelikTercihi",
+    "uyelikyenilemetarihi": "SonOdeme", "uyelik yenileme tarihi": "SonOdeme",
+    "uyelikguntercihi": "UyelikGunTercihi", "uyelik gun tercihi": "UyelikGunTercihi",
+    "uyelikyenilemetercihi": "UyelikYenilemeTercihi", "uyelik yenileme tercihi": "UyelikYenilemeTercihi",
+    "uyelik durumu": "UyelikDurumu",    
 }
 
-if "DB_PATH" not in st.session_state:
-    st.session_state.DB_PATH = DEFAULT_DB_PATH
-if "google_sheet_id" not in st.session_state:
-    st.session_state.google_sheet_id = DEFAULT_GOOGLE_SHEET_ID
-if "google_sheet_id_input" not in st.session_state:
-    st.session_state.google_sheet_id_input = st.session_state.get("google_sheet_id", "")
-if "local_excel_path" not in st.session_state:
-    st.session_state.local_excel_path = os.path.abspath("futbol_okulu.xlsx")
-
-# =========================
-# DB Helpers
-# =========================
-def get_conn():
-    return sqlite3.connect(st.session_state.DB_PATH, check_same_thread=False)
-
-def init_db():
-    conn = get_conn(); c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ad TEXT, soyad TEXT, veli_ad TEXT, veli_tel TEXT,
-        takim TEXT, kayit_tarihi TEXT, dogum_tarihi TEXT,
-        aktif_mi INTEGER DEFAULT 1, uye_tipi TEXT DEFAULT 'Aylık'
-    )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS groups (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ad TEXT UNIQUE
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS invoices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER, donem TEXT, tutar REAL,
-        son_odeme_tarihi TEXT, durum TEXT DEFAULT 'bekliyor',
-        FOREIGN KEY(student_id) REFERENCES students(id)
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_id INTEGER, tarih TEXT, tutar REAL, aciklama TEXT,
-        FOREIGN KEY(invoice_id) REFERENCES invoices(id)
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS msg_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT, template_name TEXT, msg_type TEXT,
-        payload TEXT, status TEXT, ts TEXT
-    )
-    """)
-    conn.commit(); conn.close()
-
-init_db()
-
-# =========================
-# Backup & Restore (Excel/Sheets)
-# =========================
-def fetch_db_tables() -> dict[str, pd.DataFrame]:
-    conn = get_conn()
-    try:
-        return {t: pd.read_sql_query(f"SELECT * FROM {t}", conn) for t in TABLE_NAMES}
-    except Exception:
-        return {t: pd.DataFrame() for t in TABLE_NAMES}
-    finally:
-        conn.close()
-
-EXCEL_MAX_ROWS = 1_048_576
-# Header satırı da sayıldığı için Excel sayfasına yazılabilecek maksimum
-# veri satırı sayısı sınırdan bir eksik olmalı. Aksi hâlde 1_048_576 kayıt
-# içeren bir tablo yazılırken başlık satırıyla birlikte sınır aşılır ve
-# "Row numbers must be between 1 and 1048576" hatası alınır.
-EXCEL_MAX_DATA_ROWS = max(1, EXCEL_MAX_ROWS - 1)
-
-def _sanitize_excel_sheet_name(name: str, position: int, used: set[str]) -> str:
-    invalid_chars = {"\\", "/", "*", "[", "]", ":", "?"}
-    sanitized = "".join(ch for ch in name if ch not in invalid_chars).strip()
-    if not sanitized:
-        sanitized = f"Sheet{position}"
-    if len(sanitized) > 31:
-        sanitized = sanitized[:31]
-
-    candidate = sanitized
-    suffix = 1
-    while candidate in used:
-        suffix_text = f"_{suffix}"
-        candidate = (sanitized[: 31 - len(suffix_text)] if len(sanitized) + len(suffix_text) > 31 else sanitized) + suffix_text
-        suffix += 1
-
-    used.add(candidate)
-    return candidate
+HEADER_HINTS = {"adi","soyadi","telefon","grup","koc","kayit","uyelik","seviye"}
 
 
+def detect_header_row(df: pd.DataFrame, scan_rows: int = 30) -> int:
+    """İlk scan_rows satırı tarar; en çok header ipucu içeren satırı başlık kabul eder.
+    Dönen değer: header satır index'i. Bulamazsa 0 döner.
+    """
+    best_row, best_score = 0, -1
+    max_r = min(scan_rows, len(df))
+    for r in range(max_r):
+        row_vals = [norm_key(v) for v in df.iloc[r].tolist()]
+        score = 0
+        for v in row_vals:
+            for hint in HEADER_HINTS:
+                if hint in v:
+                    score += 1
+        if score > best_score:
+            best_score, best_row = score, r
+    return best_row
 
-def _df_to_gspread_values(df: pd.DataFrame) -> list[list[Any]]:
-    values: list[list[Any]] = []
-    headers = [str(col) for col in df.columns]
-    if headers: values.append(headers)
-    for record in df.itertuples(index=False, name=None):
-        row_values = [("" if (v is None or (isinstance(v, float) and pd.isna(v))) else v) for v in record]
-        values.append(row_values)
-    return values
 
-def _load_service_account_info() -> dict[str, Any] | None:
-    candidate_keys = ["gcp_service_account","service_account","google_service_account",
-                      "GOOGLE_SERVICE_ACCOUNT_JSON","GOOGLE_APPLICATION_CREDENTIALS_JSON"]
-    for key in candidate_keys:
-        try:
-            secret_value = st.secrets[key]
-            if isinstance(secret_value, dict): return secret_value
-            if isinstance(secret_value, str) and secret_value.strip(): return json.loads(secret_value)
-        except (KeyError, FileNotFoundError): pass
-        env_value = os.getenv(key)
-        if env_value and env_value.strip():
-            try: return json.loads(env_value)
-            except json.JSONDecodeError: continue
+def apply_aliases(cols: List[str]) -> List[str]:
+    renamed = []
+    for c in cols:
+        nk = norm_key(c)
+        renamed.append(ALIAS_MAP.get(nk, c))
+    return renamed
+
+
+def normalize_students_df(df: pd.DataFrame) -> pd.DataFrame:
+    # 1) Başlığı tespit et
+    hdr = detect_header_row(df)
+    header_vals = df.iloc[hdr].tolist()
+    # 2) Yeni başlıkları uygula ve üst satırları at
+    df2 = df.iloc[hdr+1:].reset_index(drop=True).copy()
+    df2.columns = header_vals
+    # 3) Alias uygula
+    df2 = df2.rename(columns={c: ALIAS_MAP.get(norm_key(c), c) for c in df2.columns})
+    # 4) Eksik kolonları tamamla
+    for c in BASE_COLS:
+        if c not in df2.columns:
+            df2[c] = None
+    # Türler
+    if "ID" in df2.columns:
+        df2["ID"] = pd.to_numeric(df2["ID"], errors="coerce")
+        if df2["ID"].isna().all():
+            df2["ID"] = range(1, len(df2) + 1)
+    else:
+        df2["ID"] = range(1, len(df2) + 1)
+    df2["ID"] = df2["ID"].fillna(0).astype(int)
+
+    for c in ("DogumTarihi","Baslangic","SonOdeme"):
+        df2[c] = df2.get(c).apply(coerce_date_value)
+
+    df2["UcretAylik"] = pd.to_numeric(df2.get("UcretAylik", 0), errors="coerce").fillna(0)
+    df2["Telefon"] = df2.get("Telefon","").astype(str)
+
+    if "UyelikDurumu" in df2.columns:
+        raw_status = df2["UyelikDurumu"]
+    elif "AktifDurumu" in df2.columns:
+        raw_status = df2["AktifDurumu"]
+    elif "Aktif" in df2.columns:
+        raw_status = df2["Aktif"]
+    else:
+        raw_status = pd.Series([True] * len(df2))
+    durumlar = [resolve_membership_status(v) for v in raw_status]
+    df2["AktifDurumu"] = durumlar
+    df2["Aktif"] = [d == "Aktif" for d in durumlar]
+
+    df2["UyelikTercihi"] = pd.to_numeric(df2.get("UyelikTercihi", 0), errors="coerce").fillna(0).astype(int)
+    df2["UyelikTercihi"] = df2["UyelikTercihi"].clip(lower=0, upper=12)  # esneklik, sonra 0-4'e kırparız
+
+    return df2[BASE_COLS]
+
+
+# ==========================
+# Excel Yükleme (header tespitli)
+# ==========================
+
+@st.cache_data(show_spinner=False)
+def load_excel(excel_bytes: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    xls = pd.ExcelFile(io.BytesIO(excel_bytes))
+    sheets = xls.sheet_names
+    # 'Ogrenciler' tercih et, yoksa ilk sayfa
+    sheet = "Ogrenciler" if "Ogrenciler" in sheets else (sheets[0] if sheets else None)
+    if sheet is None:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ""
+    # Başlıksız (header=None) okuyup tespit yapacağız
+    raw = xls.parse(sheet, header=None)
+    ogr = normalize_students_df(raw)
+    # Opsiyonel sayfalar
+    yok = xls.parse("Yoklama") if "Yoklama" in sheets else pd.DataFrame(columns=["Tarih","Grup","OgrenciID","AdSoyad","Koc","Katildi","Not"])
+    tah = xls.parse("Tahsilat") if "Tahsilat" in sheets else pd.DataFrame(columns=["Tarih","OgrenciID","AdSoyad","Koc","Tutar","Aciklama"])
+    for df_, dcol in [(yok,"Tarih"), (tah,"Tarih")]:
+        if not df_.empty and dcol in df_.columns:
+            df_[dcol] = pd.to_datetime(df_[dcol], errors="coerce").dt.date
+    return ogr, yok, tah, sheet
+
+
+def write_excel(ogr: pd.DataFrame, yok: pd.DataFrame, tah: pd.DataFrame) -> bytes:
+    buff = io.BytesIO()
+    with pd.ExcelWriter(buff, engine="openpyxl") as w:
+        ogr.to_excel(w, index=False, sheet_name="Ogrenciler")
+        yok.to_excel(w, index=False, sheet_name="Yoklama")
+        tah.to_excel(w, index=False, sheet_name="Tahsilat")
+    buff.seek(0)
+    return buff.read()
+
+
+def coerce_date_value(value) -> Optional[date]:
+    """Çeşitli tarih formatlarını `date` nesnesine çevir."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+        # Sayı olarak sadece yıl bilgisi girilmişse (örn. 2010)
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not float(value).is_integer():
+            # Excel seri numaraları veya ondalıklar için pandas'a bırak.
+            pass
+        else:
+            year = int(value)
+            if 1900 <= year <= 2100:
+                return date(year, 1, 1)
+
+    if isinstance(value, str):
+        value_stripped = value.strip()
+        if not value_stripped:
+            return None
+        if value_stripped.isdigit() and len(value_stripped) == 4:
+            year = int(value_stripped)
+            if 1900 <= year <= 2100:
+                return date(year, 1, 1)
+
+    if pd.isna(parsed):
+        return None
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.date()
+    if isinstance(parsed, date):
+        return parsed
     return None
 
-def _get_gspread_client():
-    if gspread is None:
-        return None, "Google Sheets için gspread paketi eksik."
-    if GoogleCredentials is None:
-        return None, "Google Sheets için google-auth paketi eksik."
-    info = _load_service_account_info()
-    if not info:
-        return None, "Service account JSON bulunamadı (secrets veya env)."
-    try:
-        credentials = GoogleCredentials.from_service_account_info(
-            info, scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.file",
-            ],
-        )
-        client = gspread.authorize(credentials)
-        return client, None
-    except Exception as exc:
-        return None, f"Google yetkilendirme hatası: {exc}"
+def parse_date_str(value: str) -> Optional[date]:
+    return coerce_date_value(value)
 
-def export_db_to_excel_bytes() -> bytes:
-    sheets = fetch_db_tables()
-    def _iter_excel_sheets() -> Iterator[tuple[str, pd.DataFrame]]:
-        used_names: set[str] = set()
-        position = 0
-        for original_name, df in sheets.items():
-            total_rows = len(df)
-            if total_rows == 0:
-                boundaries = [(0, 0)]
-            else:
-                boundaries = [
-                    (start, min(start + EXCEL_MAX_DATA_ROWS, total_rows))
-                    for start in range(0, total_rows, EXCEL_MAX_DATA_ROWS)
-                ]
 
-            for chunk_idx, (start, end) in enumerate(boundaries):
-                position += 1
-                candidate_name = original_name if chunk_idx == 0 else f"{original_name}_part{chunk_idx + 1}"
-                sheet_name = _sanitize_excel_sheet_name(candidate_name, position, used_names)
-                yield sheet_name, df.iloc[start:end]
 
-    
-    def _write_excel(engine: str) -> bytes:
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine=engine) as writer:
-            for sheet_name, df in _iter_excel_sheets():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-        buffer.seek(0)
-        return buffer.getvalue()
-    try:
-        return _write_excel("openpyxl")
-    except ModuleNotFoundError:
-        try:
-            return _write_excel("xlsxwriter")
-        except ModuleNotFoundError:
-            # Minimal writer
-            timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-            buffer = io.BytesIO()
-            sheet_entries: list[tuple[str, str]] = []
-
-            def _column_letter(idx: int) -> str:
-                letters = []
-                while idx > 0:
-                    idx, remainder = divmod(idx - 1, 26)
-                    letters.append(chr(65 + remainder))
-                return "".join(reversed(letters)) or "A"
-            for sheet_name, df in _iter_excel_sheets():
-                rows: list[list[Any]] = []
-                if list(df.columns): rows.append([str(col) for col in df.columns])
-                for record in df.itertuples(index=False, name=None):
-                    row_values = [("" if (v is None or (isinstance(v, float) and pd.isna(v))) else v) for v in record]
-                    rows.append(row_values)
-
-                max_columns = max((len(r) for r in rows), default=0)
-                max_rows = len(rows) or 1
-                dimension = "A1" if max_columns == 0 else f"A1:{_column_letter(max_columns)}{max_rows}"
-
-                cells_xml: list[str] = []
-                for r_idx, row in enumerate(rows, start=1):
-                    cell_xml: list[str] = []
-                    for c_idx in range(1, max_columns + 1):
-                        cell_ref = f"{_column_letter(c_idx)}{r_idx}"
-                        try: value = row[c_idx - 1]
-                        except IndexError: value = ""
-                        if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
-                            cell_xml.append(f"<c r=\"{cell_ref}\"/>"); continue
-                        if isinstance(value, numbers.Number) and not isinstance(value, bool):
-                            cell_xml.append(f"<c r=\"{cell_ref}\"><v>{value}</v></c>"); continue
-                        if isinstance(value, bool):
-                            cell_xml.append(f"<c r=\"{cell_ref}\" t=\"b\"><v>{int(value)}</v></c>"); continue
-                        cell_xml.append(
-                            "<c r=\"{ref}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{text}</t></is></c>".format(
-                                ref=cell_ref, text=escape(str(value)),
-                            )
-                        )
-                    cells_xml.append(f"<row r=\"{r_idx}\">{''.join(cell_xml)}</row>")
-
-                sheet_xml = (
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\""
-                    " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-                    f"<dimension ref=\"{dimension}\"/>"
-                    "<sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>"
-                    "<sheetFormatPr defaultRowHeight=\"15\"/>"
-                    f"<sheetData>{''.join(cells_xml)}</sheetData>"
-                    "</worksheet>"
-                )
-                sheet_entries.append((sheet_name, sheet_xml))
-
-            def _escape_sheet_attr(value: str) -> str:
-                # XML öznitelikleri için çift tırnak kaçışı
-                return escape(value, {'"': '&quot;'})     
-
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(
-                    "[Content_Types].xml",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-                    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-                    "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-                    "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-                    "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
-                    + "".join(
-                        f"<Override PartName=\"/xl/worksheets/sheet{idx}.xml\" "
-                        "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
-                        for idx in range(1, len(sheet_entries) + 1)
-                    )
-                    + "</Types>",
-                )
-                zf.writestr(
-                    "_rels/.rels",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
-                    "</Relationships>",
-                )
-                zf.writestr(
-                    "docProps/core.xml",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
-                    "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
-                    "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
-                    "<dc:creator>Futbol Okulu</dc:creator>"
-                    "<cp:lastModifiedBy>Futbol Okulu</cp:lastModifiedBy>"
-                    f"<dcterms:created xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:created>"
-                    f"<dcterms:modified xsi:type=\"dcterms:W3CDTF\">{timestamp}</dcterms:modified>"
-                    "</cp:coreProperties>",
-                )
-                zf.writestr(
-                    "docProps/app.xml",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" "
-                    "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">"
-                    "<Application>Futbol Okulu</Application>"
-                    "</Properties>",
-                )
-    
-                workbook_sheets_xml = "".join(
-                    f'<sheet name="{_escape_sheet_attr(name)}" sheetId="{idx}" r:id="rId{idx}"/>'
-                    for idx, (name, _) in enumerate(sheet_entries, start=1)
-                )
-                zf.writestr(
-                    "xl/workbook.xml",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
-                    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-                    "<bookViews><workbookView/></bookViews>"
-                    f"<sheets>{workbook_sheets_xml}</sheets>"
-                    "</workbook>",
-                )
-                workbook_rels_xml = "".join(
-                    f"<Relationship Id=\"rId{idx}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{idx}.xml\"/>"
-                    for idx in range(1, len(sheet_entries) + 1)
-                )
-                zf.writestr(
-                    "xl/_rels/workbook.xml.rels",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                    f"{workbook_rels_xml}"
-                    "</Relationships>",
-                )
-                for idx, (_, sheet_xml) in enumerate(sheet_entries, start=1):
-                    zf.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml)
-
-            buffer.seek(0)
-            return buffer.getvalue()
-
-def _normalize_import_value(value, column: str):
-    if value is None: return None
-    if isinstance(value, str):
-        value = value.strip()
-        if value == "": return None
-    if pd.isna(value): return None
-    if column in {"id","student_id","invoice_id","aktif_mi"}:
-        if isinstance(value, bool): return int(value)
-        if isinstance(value, (float,int)) and not pd.isna(value): return int(value)
-        value_str = str(value).strip()
-        if value_str.isdigit(): return int(value_str)
-        raise ValueError(f"{column} için sayısal değer bekleniyor: {value}")
-    if column == "tutar":
-        if isinstance(value, (float,int)): return float(value)
-        return float(str(value).replace(",", ".").strip())
-    if column in {"dogum_tarihi","son_odeme_tarihi","tarih","kayit_tarihi"}:
-        if isinstance(value, (datetime, date)): return value.isoformat()
-        if isinstance(value, str): return value.strip()
-        raise ValueError(f"{column} için tarih bekleniyor: {value}")
-    if isinstance(value, pd.Timestamp): return value.isoformat()
+def date_to_str(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        value = value.date()
+    if isinstance(value, date):
+        return value.isoformat()
+    value = str(value).strip()
+    if value.lower() in {"nan", "nat", "none"}:
+        return ""
     return value
 
-def _reset_stream_position(handle: Any) -> None:
-    if hasattr(handle, "seek"):
-        try: handle.seek(0)
-        except Exception: pass
 
-def _coerce_to_buffer(data_source: Any) -> io.BytesIO:
-    if isinstance(data_source, (str, os.PathLike)):
-        with open(data_source, "rb") as fh: return io.BytesIO(fh.read())
-    if isinstance(data_source, bytes): return io.BytesIO(data_source)
-    getvalue = getattr(data_source, "getvalue", None)
-    if callable(getvalue):
-        try: return io.BytesIO(getvalue())
-        except TypeError: pass
-    read = getattr(data_source, "read", None)
-    if callable(read):
-        content = read(); _reset_stream_position(data_source); return io.BytesIO(content)
-    raise TypeError("Desteklenmeyen veri kaynağı")
+def to_int(value, default: int = 0) -> int:
+    if value is None:
+        return default
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return default
+    return int(numeric)
 
-def _column_index(column_ref: str) -> int:
-    result = 0
-    for char in column_ref.upper():
-        if "A" <= char <= "Z":
-            result = result * 26 + (ord(char) - 64)
-    return max(result, 1)
+def format_display_value(value) -> str:
+    if isinstance(value, pd.Timestamp):
+        value = value.date()
+    if isinstance(value, date):
+        return value.isoformat()
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    if pd.isna(value):
+        return ""
+    return str(value)
 
-def _parse_cell_value(cell: ET.Element, namespaces: dict[str, str]) -> Any:
-    cell_type = cell.attrib.get("t"); value_element = cell.find("main:v", namespaces)
-    if cell_type == "inlineStr":
-        inline = cell.find("main:is", namespaces)
-        text_element = inline.find("main:t", namespaces) if inline is not None else None
-        return "" if text_element is None else (text_element.text or "")
-    if cell_type == "b":
-        raw = value_element.text if value_element is not None else "0"
-        try: return bool(int(str(raw or "0")))
-        except ValueError: return False
-    if value_element is None or (value_element.text or "").strip() == "": return None
-    raw_text = value_element.text or ""
-    try:
-        as_float = float(raw_text)
-        return int(as_float) if as_float.is_integer() else as_float
-    except ValueError:
-        return raw_text
 
-def _read_simple_xlsx(data_source: Any) -> dict[str, pd.DataFrame]:
-    buffer = _coerce_to_buffer(data_source); result: dict[str, pd.DataFrame] = {}
-    with zipfile.ZipFile(buffer) as zf:
-        workbook_xml = zf.read("xl/workbook.xml")
-        workbook_tree = ET.fromstring(workbook_xml)
-        namespaces = {"main":"http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-                      "r":"http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
-        rel_tree = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
-        rel_ns = {"rel":"http://schemas.openxmlformats.org/package/2006/relationships"}
-        relationships = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rel_tree.findall("rel:Relationship", rel_ns)}
-        for sheet in workbook_tree.findall("main:sheets/main:sheet", namespaces):
-            sheet_name = sheet.attrib.get("name", "Sheet")
-            rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-            if not rel_id: continue
-            target = relationships.get(rel_id)
-            if not target: continue
-            target_path = target.lstrip("/")
-            if not target_path.startswith("xl/"): target_path = f"xl/{target_path}"
-            sheet_xml = ET.fromstring(zf.read(target_path))
-            rows: list[list[Any]] = []
-            for row in sheet_xml.findall("main:sheetData/main:row", namespaces):
-                row_values: list[Any] = []; current_col = 1
-                for cell in row.findall("main:c", namespaces):
-                    ref = cell.attrib.get("r", "")
-                    match = re.match(r"([A-Za-z]+)", ref)
-                    col_index = _column_index(match.group(1)) if match else current_col
-                    while current_col < col_index:
-                        row_values.append(None); current_col += 1
-                    row_values.append(_parse_cell_value(cell, namespaces)); current_col += 1
-                rows.append(row_values)
-            if not rows: result[sheet_name] = pd.DataFrame(); continue
-            max_columns = max((len(r) for r in rows), default=0)
-            for r in rows:
-                if len(r) < max_columns: r.extend([None] * (max_columns - len(r)))
-            header = [str(col).strip() if col is not None else "" for col in rows[0]]
-            data_rows = []
-            for row in rows[1:]:
-                row = list(row[: len(header)])
-                if len(row) < len(header): row.extend([None] * (len(header) - len(row)))
-                if any(cell not in (None, "") for cell in row): data_rows.append(row)
-            result[sheet_name] = pd.DataFrame(data_rows, columns=header)
-    return result
 
-def _read_excel_workbook(uploaded_file: Any) -> dict[str, pd.DataFrame]:
-    try:
-        _reset_stream_position(uploaded_file)
-        return pd.read_excel(uploaded_file, sheet_name=None)
-    except (ModuleNotFoundError, ImportError) as exc:
-        if "openpyxl" not in str(exc): raise
-        _reset_stream_position(uploaded_file)
-        return _read_simple_xlsx(uploaded_file)
+# ==========================
+# Yaş Hesaplama
+# ==========================
 
-def import_db_from_frames(sheets: dict[str, pd.DataFrame]) -> tuple[bool, list[str]]:
-    processed: list[str] = []
-    conn = get_conn(); cursor = conn.cursor()
-    try:
-        cursor.execute("PRAGMA foreign_keys=OFF")
-        for table in TABLE_NAMES:
-            columns = EXPECTED_IMPORT_COLUMNS[table]
-            df = sheets.get(table)
-            if df is None: continue
-            missing = [col for col in columns if col not in df.columns]
-            if missing: raise ValueError(f"{table} sayfasında eksik sütunlar: {', '.join(missing)}")
-            subset = df[columns].copy()
-            cursor.execute(f"DELETE FROM {table}")
-            try: cursor.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
-            except sqlite3.Error: pass
-            if subset.empty:
-                processed.append(f"{table}: 0 satır aktarıldı"); continue
-            rows = []
-            for row in subset.itertuples(index=False, name=None):
-                cleaned = []
-                for col_name, cell in zip(columns, row):
-                    cleaned.append(_normalize_import_value(cell, col_name))
-                rows.append(tuple(cleaned))
-            placeholders = ",".join(["?"] * len(columns))
-            column_sql = ",".join(columns)
-            cursor.executemany(f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", rows)
-            processed.append(f"{table}: {len(rows)} satır aktarıldı")
-        conn.commit()
-    except Exception as exc:
-        conn.rollback(); return False, [str(exc)]
-    finally:
-        try: cursor.execute("PRAGMA foreign_keys=ON")
-        except sqlite3.Error: pass
-        conn.close()
-    return True, processed if processed else ["Excel'de beklenen sayfalar yok"]
-
-def import_db_from_excel(uploaded_file) -> tuple[bool, list[str]]:
-    try:
-        sheets = _read_excel_workbook(uploaded_file)
-    except Exception as exc:
-        return False, [f"Excel dosyası okunamadı: {exc}"]
-    return import_db_from_frames(sheets)
-
-def import_db_from_excel_path(path: str) -> tuple[bool, list[str]]:
-    path = (path or "").strip()
-    if not path: return False, ["Excel dosya yolu boş olamaz."]
-    if not os.path.exists(path): return False, [f"Excel dosyası bulunamadı: {path}"]
-    try: sheets = _read_excel_workbook(path)
-    except Exception as exc: return False, [f"Excel dosyası okunamadı: {exc}"]
-    return import_db_from_frames(sheets)
-
-def import_db_from_google_sheet(sheet_id: str) -> tuple[bool, list[str]]:
-    sheet_id = (sheet_id or "").strip()
-    if not sheet_id: return False, ["Google Sheet ID boş olamaz."]
-    client, error = _get_gspread_client()
-    if error: return False, [error]
-    try: spreadsheet = client.open_by_key(sheet_id)
-    except Exception as exc: return False, [f"Google Sheet açılamadı: {exc}"]
-    sheets: dict[str, pd.DataFrame] = {}
-    for table in TABLE_NAMES:
-        try: worksheet = spreadsheet.worksheet(table)
-        except WorksheetNotFound: continue
-        values = worksheet.get_all_values()
-        if not values:
-            sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table]); continue
-        header, *rows = values
-        if not header:
-            sheets[table] = pd.DataFrame(columns=EXPECTED_IMPORT_COLUMNS[table]); continue
-        df = pd.DataFrame(rows, columns=header).replace("", pd.NA)
-        sheets[table] = df
-    if not sheets: return False, ["Çalışma kitabında beklenen tablo adları bulunamadı."]
-    return import_db_from_frames(sheets)
-
-def export_db_to_google_sheet(sheet_id: str) -> tuple[bool, str]:
-    sheet_id = (sheet_id or "").strip()
-    if not sheet_id: return False, "Google Sheet ID boş olamaz."
-    client, error = _get_gspread_client()
-    if error: return False, error
-    try: spreadsheet = client.open_by_key(sheet_id)
-    except Exception as exc: return False, f"Google Sheet açılamadı: {exc}"
-    tables = fetch_db_tables()
-    for table, df in tables.items():
-        try: worksheet = spreadsheet.worksheet(table)
-        except WorksheetNotFound:
-            rows = max(len(df) + 1, 1); cols = max(len(df.columns), 1)
-            worksheet = spreadsheet.add_worksheet(title=table, rows=str(rows), cols=str(cols))
-        values = _df_to_gspread_values(df) or [[""]]
-        row_count = len(values); col_count = max((len(r) for r in values), default=1)
-        try:
-            worksheet.clear(); worksheet.resize(rows=row_count, cols=col_count); worksheet.update(values)
-        except Exception as exc:
-            return False, f"{table} sayfası yazılamadı: {exc}"
-    return True, "Veritabanı Google Sheets'e aktarıldı."
-
-def export_db_to_excel_file(path: str) -> tuple[bool, str]:
-    path = (path or "").strip()
-    if not path: return False, "Excel dosya yolu boş olamaz."
-    directory = os.path.dirname(path)
-    if directory and not os.path.exists(directory):
-        try: os.makedirs(directory, exist_ok=True)
-        except OSError as exc: return False, f"Klasör oluşturulamadı: {exc}"
-    try:
-        with open(path, "wb") as fh:
-            fh.write(export_db_to_excel_bytes())
-    except OSError as exc:
-        return False, f"Excel dosyası yazılamadı: {exc}"
-    return True, f"Veritabanı `{path}` dosyasına kaydedildi."
-
-# =========================
-# WhatsApp Cloud API
-# =========================
-def wa_headers():
-    return {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-
-def _post_whatsapp_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"{GRAPH_BASE}/{WABA_PHONE_NUMBER_ID}/messages"
-    try:
-        r = requests.post(url, json=payload, headers=wa_headers(), timeout=30)
-        try: data = r.json() if r.content else {}
-        except ValueError: data = {"raw": r.text}
-        return {"status_code": r.status_code, "data": data}
-    except requests.RequestException as exc:
-        return {"status_code": None, "error": str(exc), "data": {}}
-
-def send_template(to_phone_e164: str, template_name: str, lang_code="tr", body_params: List[str] = None) -> Dict[str, Any]:
-    payload = {"messaging_product":"whatsapp","to":to_phone_e164,"type":"template",
-               "template":{"name":template_name,"language":{"code":lang_code},"components":[]}}
-    if body_params:
-        payload["template"]["components"].append({"type":"body","parameters":[{"type":"text","text":str(x)} for x in body_params]})
-    return _post_whatsapp_payload(payload)
-
-def send_text(to_phone_e164: str, text: str) -> Dict[str, Any]:
-    payload = {"messaging_product":"whatsapp","to":to_phone_e164,"type":"text","text":{"body":text}}
-    return _post_whatsapp_payload(payload)
-
-def _response_status_label(resp: Dict[str, Any]) -> str:
-    code = resp.get("status_code")
-    if isinstance(code, int) and 200 <= code < 300: return "ok"
-    if resp.get("error"): return "err_request"
-    return f"err_{code if code is not None else 'unknown'}"
-
-_WHATSAPP_ERROR_HINTS = {(131030, None): "Numara izinli alıcılar listesinde değil (WhatsApp Manager → Phone numbers → Allowed recipients)."}
-
-def _format_whatsapp_error(err: Dict[str, Any]) -> str | None:
-    if not isinstance(err, dict): return None
-    message = err.get("message"); code = err.get("code"); subcode = err.get("error_subcode")
-    normalized_codes: List[tuple[int, Any]] = []
-    if isinstance(code, numbers.Integral):
-        norm_code = int(code); norm_sub = int(subcode) if isinstance(subcode, numbers.Integral) else subcode
-        normalized_codes += [(norm_code, norm_sub), (norm_code, None)]
-    elif isinstance(code, str) and code.isdigit():
-        norm_code = int(code); normalized_codes += [(norm_code, int(subcode))] if (isinstance(subcode, str) and subcode.isdigit()) else []
-        normalized_codes.append((norm_code, None))
-    for key in normalized_codes:
-        hint = _WHATSAPP_ERROR_HINTS.get(key)
-        if hint: return f"{message.strip()} — {hint}" if isinstance(message, str) and message.strip() else hint
-    if isinstance(message, str) and message.strip(): return message.strip()
-    for k in ("error_user_msg","error_user_title","details","summary"):
-        v = err.get(k)
-        if isinstance(v, str) and v.strip(): return v.strip()
-    return None
-
-def _response_error_message(resp: Dict[str, Any]) -> str:
-    if resp.get("error"): return str(resp["error"])
-    data = resp.get("data")
-    if isinstance(data, dict):
-        err = data.get("error")
-        if isinstance(err, dict):
-            formatted = _format_whatsapp_error(err)
-            if formatted: return formatted
-            return str(err)
-        if data: return str(data)
-    return "Bilinmeyen hata"
-
-def log_msg(phone: str, template_name: str, msg_type: str, payload: str, status: str):
-    conn = get_conn(); c = conn.cursor()
-    c.execute("INSERT INTO msg_log(phone, template_name, msg_type, payload, status, ts) VALUES(?,?,?,?,?,?)",
-              (phone, template_name, msg_type, payload, status, datetime.now().isoformat(timespec="seconds")))
-    conn.commit(); conn.close()
-
-# =========================
-# Data Helpers
-# =========================
-def df_students() -> pd.DataFrame:
-    conn = get_conn(); df = pd.read_sql_query("SELECT * FROM students", conn); conn.close(); return df
-
-def df_groups() -> pd.DataFrame:
-    conn = get_conn(); df = pd.read_sql_query("SELECT * FROM groups ORDER BY ad COLLATE NOCASE ASC", conn); conn.close(); return df
-
-def df_invoices(join_students=True) -> pd.DataFrame:
-    conn = get_conn()
-    if join_students:
-        q = """
-        SELECT invoices.*, students.ad, students.soyad, students.veli_tel
-        FROM invoices
-        LEFT JOIN students ON students.id = invoices.student_id
-        ORDER BY date(invoices.son_odeme_tarihi) ASC
-        """
+def compute_age(birth_value, today: date) -> Optional[int]:
+    """Doğum tarihinden bugünkü yaşını hesapla."""
+    if birth_value is None:
+        return None
+    if isinstance(birth_value, float) and pd.isna(birth_value):
+        return None
+    if isinstance(birth_value, pd.Timestamp):
+        birth_date = birth_value.date()
+    elif isinstance(birth_value, date):
+        birth_date = birth_value
     else:
-        q = "SELECT * FROM invoices ORDER BY date(son_odeme_tarihi) ASC"
-    df = pd.read_sql_query(q, conn); conn.close(); return df
+        birth_date = coerce_date_value(birth_value)
+    if birth_date is None:
+        return None
+    if birth_date > today:
+        return None
+    years = today.year - birth_date.year - (
+        (today.month, today.day) < (birth_date.month, birth_date.day)
+    )
+    return max(int(years), 0)
 
-def upsert_student(row: dict, row_id: int | None):
-    conn = get_conn(); c = conn.cursor()
-    if row_id:
-        c.execute("""UPDATE students SET ad=?, soyad=?, veli_ad=?, veli_tel=?, takim=?, kayit_tarihi=?, dogum_tarihi=?, aktif_mi=?, uye_tipi=? WHERE id=?""",
-                  (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),
-                   row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık"),row_id))
+
+
+# ==========================
+# Uygulama
+# ==========================
+
+st.set_page_config(page_title="Futbol Okulu", page_icon="⚽", layout="wide")
+st.sidebar.title("⚽ Futbol Okulu — Otomatik Başlık")
+
+uploaded = st.sidebar.file_uploader("Excel yükle (.xlsx)", type=["xlsx"])
+if uploaded:
+    ogr_yuklu, yok_yuklu, tah_yuklu, used_sheet = load_excel(uploaded.getvalue())
+    st.session_state["ogr"] = ogr_yuklu
+    st.session_state["yok"] = yok_yuklu
+    st.session_state["tah"] = tah_yuklu
+    st.sidebar.success(f"Yüklenen sayfa: {used_sheet}")
+if "ogr" not in st.session_state:
+    st.session_state["ogr"] = pd.DataFrame([
+        {"ID":1,"AdSoyad":"Demo Öğrenci","Telefon":"0533","Grup":"U10","Seviye":"Başlangıç","Koc":"Ahmet",
+         "Baslangic":dt.date(2025,9,1),"UcretAylik":1500,"SonOdeme":dt.date(2025,10,1),"Aktif":True,"AktifDurumu":"Aktif","UyelikTercihi":1}
+    ])
+if "yok" not in st.session_state:
+    st.session_state["yok"] = pd.DataFrame(columns=["Tarih","Grup","OgrenciID","AdSoyad","Koc","Katildi","Not"])
+if "tah" not in st.session_state:
+    st.session_state["tah"] = pd.DataFrame(columns=["Tarih","OgrenciID","AdSoyad","Koc","Tutar","Aciklama"])
+
+ogr = st.session_state["ogr"]
+yok = st.session_state["yok"]
+tah = st.session_state["tah"]
+
+# ==========================
+# Genel Bakış ve Menü
+# ==========================
+
+UYELIK_AY = {0:0, 1:1, 2:3, 3:6, 4:12}
+UYELIK_LABELS = {
+    0: "",
+    1: "1 Aylık",
+    2: "3 Aylık",
+    3: "6 Aylık",
+    4: "12 Aylık",
+}
+
+def add_months(d: date, months: int) -> Optional[date]:
+    if pd.isna(d) or d is None or months is None:
+        return None
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    mdays = [31, 29 if (y%4==0 and (y%100!=0 or y%400==0)) else 28, 31,30,31,30,31,31,30,31,30,31][m-1]
+    day = min(d.day, mdays)
+    return date(y, m, day)
+
+_today = dt.date.today()
+
+def build_expiry_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    tmp = df.copy()
+    tmp["Baslangic"] = pd.to_datetime(tmp.get("Baslangic"), errors="coerce").dt.date
+    tmp["UyelikTercihi"] = pd.to_numeric(tmp.get("UyelikTercihi", 0), errors="coerce").fillna(0).astype(int)
+    tmp["UyelikTercihi"] = tmp["UyelikTercihi"].clip(lower=0, upper=4)
+    
+    if "AktifDurumu" in tmp.columns:
+        tmp["UyelikDurumu"] = tmp["AktifDurumu"].fillna("Pasif")
+    elif "Aktif" in tmp.columns:
+        tmp["UyelikDurumu"] = tmp["Aktif"].apply(resolve_membership_status)
     else:
-        c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi) VALUES(?,?,?,?,?,?,?,?,?)""",
-                  (row["ad"],row["soyad"],row["veli_ad"],row["veli_tel"],row.get("takim",""),row.get("kayit_tarihi"),
-                   row["dogum_tarihi"],int(row.get("aktif_mi",1)),row.get("uye_tipi","Aylık")))
-    conn.commit(); conn.close()
+        tmp["UyelikDurumu"] = "Aktif"
 
-def delete_student(row_id: int) -> bool:
-    if not row_id: return False
-    conn = get_conn(); c = conn.cursor()
-    c.execute("DELETE FROM students WHERE id=?", (row_id,))
-    conn.commit(); deleted = c.rowcount > 0; conn.close(); return deleted
+    expires, remain, sure_ay = [], [], []
+    for _, r in tmp.iterrows():
+        code = int(r.get("UyelikTercihi", 0))
+        months = UYELIK_AY.get(code, 0)
+        sure_ay.append(months)
+        start = r.get("Baslangic")
+        e = add_months(start, months) if months > 0 else None
+        expires.append(e)
+        remain.append(None if e is None else (e - _today).days)
 
-def add_group(name: str):
-    name = name.strip()
-    if not name: return False
-    conn = get_conn(); c = conn.cursor()
-    try:
-        c.execute("INSERT OR IGNORE INTO groups(ad) VALUES(?)", (name,))
-        conn.commit(); return c.rowcount > 0
-    finally:
-        conn.close()
+    tmp["UyelikSuresiAy"] = sure_ay
+    tmp["UyelikBitisTarihi"] = expires
+    tmp["KalanGun"] = remain
+    tmp["UyelikTercihiAd"] = tmp["UyelikTercihi"].map(UYELIK_LABELS).fillna("Belirtilmedi")    
 
-def add_invoice(student_id: int, donem: str, tutar: float, son_odeme_tarihi: str):
-    conn = get_conn(); c = conn.cursor()
-    c.execute("""INSERT INTO invoices(student_id, donem, tutar, son_odeme_tarihi, durum) VALUES(?,?,?,?, 'bekliyor')""",
-              (student_id, donem, float(tutar), son_odeme_tarihi))
-    conn.commit(); conn.close()
-
-def mark_paid(invoice_id: int, tutar: float):
-    conn = get_conn(); c = conn.cursor()
-    today = date.today().isoformat()
-    c.execute("UPDATE invoices SET durum='odendi' WHERE id=?", (invoice_id,))
-    c.execute("INSERT INTO payments(invoice_id, tarih, tutar, aciklama) VALUES(?,?,?,?)",
-              (invoice_id, today, float(tutar), "Ödeme alındı"))
-    conn.commit(); conn.close()
-
-def compute_status_rollover():
-    """Vadesi geçen 'bekliyor' faturaları 'gecikti' yap."""
-    today = date.today().isoformat()
-    conn = get_conn(); c = conn.cursor()
-    c.execute("""UPDATE invoices SET durum='gecikti' WHERE durum='bekliyor' AND date(son_odeme_tarihi) < date(?)""", (today,))
-    conn.commit(); conn.close()
-
-# =========================
-# UI — Sidebar
-# =========================
-sidebar = st.sidebar
-sidebar.title("⚽ Futbol Okulu")
-sidebar.caption("Ödeme Takip + WhatsApp")
-sidebar.markdown("---")
-
-sidebar.markdown("### 📋 Menü")
-MENU_OPTIONS = ["📊 Pano","👨‍👩‍👧‍👦 Öğrenciler","🧾 Faturalar","📲 WhatsApp Gönder","🧾 Log","🎉 Özel Günler"]
-selected_menu = sidebar.radio("Sayfayı seçin", options=MENU_OPTIONS, index=0, key="navigation_menu")
-
-excel_bytes = export_db_to_excel_bytes()
-sidebar.markdown("### 📁 Excel Yedekleme / Aktarma")
-sidebar.download_button(
-    "📤 Excel olarak dışa aktar",
-    data=excel_bytes,
-    file_name=f"futbol_okulu_{date.today().isoformat()}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Tüm tablo verilerini Excel formatında indir.",
-)
-
-# Sheet1 wide Excel içe aktarma kısayolu
-sidebar.markdown("#### 📥 Excel (Sheet1 wide) içe aktar")
-excel_path_input = sidebar.text_input(
-    "Yerel Excel yolu",
-    value="ŞAHİNBEY 2025-2026 AİDAT ÇİZELGESİ VE TÜM BİLGİLER.xlsx",
-    help="Sheet1 başlıklı aidat çizelgesi dosyanızın yolu.",
-)
-uploaded_excel_file = sidebar.file_uploader(
-    "veya dosya yükleyin",
-    type=["xlsx", "xls"],
-    help="Dosya sisteminizden Excel dosyası seçin.",
-)
-if sidebar.button("Sheet1 → students + invoices aktar", use_container_width=True):
-    source: str | IO[bytes] | None = None
-    if uploaded_excel_file is not None:
-        source = uploaded_excel_file
-    elif excel_path_input.strip():
-        source = excel_path_input.strip()
-    else:
-        sidebar.warning("Lütfen geçerli bir Excel yolu girin veya dosya yükleyin.")
-
-    if source is not None:
-        ok, msgs = import_sheet1_wide_excel_to_db(source, sheet_name="Sheet1")
-        if ok:
-            sidebar.success("İçe aktarma tamamlandı ✅\n" + "\n".join(f"- {m}" for m in msgs))
-            st.rerun()
-        else:
-            sidebar.error("Hata:\n" + "\n".join(f"- {m}" for m in msgs))
-
-# Yerel Excel senkronizasyonu (tablo-tablo)
-sidebar.markdown("#### 💾 Yerel Excel Senkronizasyonu (tablo-tablo)")
-local_excel_path = sidebar.text_input(
-    "Excel dosya yolu",
-    value=st.session_state.get("local_excel_path", ""),
-    help="Tüm tabloları ayrı sayfalara yazan/okuyan yedekleme.",
-)
-st.session_state.local_excel_path = local_excel_path
-col_local_export, col_local_import = sidebar.columns(2)
-if col_local_export.button("📤 Dosyaya Kaydet", use_container_width=True):
-    success, message = export_db_to_excel_file(local_excel_path)
-    if success:
-        sidebar.success(message)
-    else:
-        sidebar.error(message)
-if col_local_import.button("📥 Dosyadan Al", use_container_width=True):
-    success, messages = import_db_from_excel_path(local_excel_path)
-    status = "success" if success else "error"
-    msg_text = "\n".join(messages)
-    if status == "success":
-        sidebar.success(msg_text)
-    else:
-        sidebar.error(msg_text)
-    st.rerun()
-
-# Google Sheets senkronizasyonu
-sidebar.markdown("### ☁️ Google Sheets Senkronizasyonu")
-sheet_id_text = sidebar.text_input(
-    "Google Sheets ID",
-    value=st.session_state.get("google_sheet_id_input", ""),
-    help=("Google Sheets kimliğini `https://docs.google.com/spreadsheets/d/<ID>/` adresinden kopyalayın."),
-)
-sheet_id_input = sheet_id_text.strip()
-if sheet_id_input != st.session_state.get("google_sheet_id", ""):
-    st.session_state.google_sheet_id = sheet_id_input
-st.session_state.google_sheet_id_input = sheet_id_input
-
-col_gs_export, col_gs_import = sidebar.columns(2)
-export_clicked = col_gs_export.button("📤 Sheets'e Yedekle", use_container_width=True, disabled=not sheet_id_input)
-import_clicked = col_gs_import.button("📥 Sheets'ten İçe Aktar", use_container_width=True, disabled=not sheet_id_input)
-
-if export_clicked:
-    success, message = export_db_to_google_sheet(sheet_id_input)
-    if success:
-        sidebar.success(message)
-    else:
-        sidebar.error(message)
-
-if import_clicked:
-    success, messages = import_db_from_google_sheet(sheet_id_input)
-    status = "success" if success else "error"
-    msg_text = "\n".join(messages)
-    if status == "success":
-        sidebar.success(msg_text)
-    else:
-        sidebar.error(msg_text)
-    st.rerun()
-
-# =========================
-# UI — Sections
-# =========================
-if selected_menu == "📊 Pano":
-    compute_status_rollover()  # <-- vadesi geçenleri 'gecikti' yap
-    st.header("📊 Pano")
-    df_inv = df_invoices()
-    today = date.today()
-    this_week_end = today + timedelta(days=7)
-
-    due_soon = df_inv[
-        (pd.to_datetime(df_inv["son_odeme_tarihi"]) >= pd.to_datetime(today)) &
-        (pd.to_datetime(df_inv["son_odeme_tarihi"]) <= pd.to_datetime(this_week_end)) &
-        (df_inv["durum"] == "bekliyor")
+    cols = [
+        "ID","AdSoyad","Koc","Grup","UyelikDurumu","UyelikTercihi","UyelikTercihiAd",
+        "Baslangic","UyelikSuresiAy","UyelikBitisTarihi","KalanGun","Telefon"
     ]
-    overdue = df_inv[df_inv["durum"] == "gecikti"]
+    for c in cols:
+        if c not in tmp.columns:
+            tmp[c] = None
+    return tmp[cols].sort_values(["KalanGun"], ascending=True, na_position="last")
 
+exp_df = build_expiry_df(ogr)
+
+menu_secimleri = [
+    "Genel Bakış Panosu",
+    "Üye Yönetimi",
+    "Tüm Üyelikler",
+    "İstatistikler",    
+    "Dışa Aktarım",
+]
+
+secim = st.sidebar.radio("Menü", menu_secimleri, index=0)
+
+toplam_ogrenci = len(ogr)
+
+if not ogr.empty:
+    if "AktifDurumu" in ogr.columns:
+        durum_serisi = ogr["AktifDurumu"].fillna("Pasif").apply(resolve_membership_status)
+    else:
+        durum_serisi = ogr.get("Aktif", pd.Series([True] * len(ogr))).apply(resolve_membership_status)
+else:
+    durum_serisi = pd.Series(dtype=object)
+
+aktif_say = int((durum_serisi == "Aktif").sum())
+dondurmus_say = int((durum_serisi == "Dondurmuş").sum())
+pasif_say = int((durum_serisi == "Pasif").sum())
+
+if not exp_df.empty and "KalanGun" in exp_df:
+    kalan_gun_serisi = pd.to_numeric(exp_df["KalanGun"], errors="coerce")
+else:
+    kalan_gun_serisi = pd.Series(dtype="float64")
+
+odeme_5gun_say = int(kalan_gun_serisi.between(0, 5, inclusive="both").sum()) if not kalan_gun_serisi.empty else 0
+odeme_gecikmis_say = int((kalan_gun_serisi < 0).sum()) if not kalan_gun_serisi.empty else 0
+
+yenileme_maske = kalan_gun_serisi.between(-5, 5, inclusive="both") if not kalan_gun_serisi.empty else pd.Series([], dtype=bool)
+yenileme_penceresi = int(yenileme_maske.sum()) if not exp_df.empty else 0
+
+yenileme_df = exp_df[yenileme_maske] if not exp_df.empty else exp_df
+
+if secim == "Genel Bakış Panosu":
+    st.header("Genel Bakış Panosu")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Bu Hafta Vadesi Dolan", len(due_soon))
-    c2.metric("Geciken Fatura", len(overdue))
-    c3.metric("Toplam Bekleyen", int((df_inv["durum"] == "bekliyor").sum()))
+    c1.metric("Toplam Öğrenci", toplam_ogrenci)
+    c2.metric("Dondurmuş Öğrenci", dondurmus_say)
+    c3.metric("Aktif Öğrenci", aktif_say)
 
-    st.subheader("Bu Hafta Vade")
-    st.dataframe(due_soon, use_container_width=True)
-    st.subheader("Gecikenler")
-    st.dataframe(overdue, use_container_width=True)
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Pasif Öğrenci", pasif_say)
+    c5.metric("Ödeme Gününe 5 Gün Kalan", odeme_5gun_say)
+    c6.metric("Ödemesi Gecikmiş Öğrenci", odeme_gecikmis_say)
 
-elif selected_menu == "👨‍👩‍👧‍👦 Öğrenciler":
-    st.header("👨‍👩‍👧‍👦 Öğrenciler")
-
-    df = df_students()
-    st.dataframe(df, use_container_width=True)
-
-    st.markdown("### Gruplar")
-    df_g = df_groups()
-    if df_g.empty:
-        st.info("Henüz grup eklenmedi. Aşağıdaki formu kullanarak yeni gruplar oluşturabilirsiniz.")
+    st.markdown("**Yenileme penceresindeki öğrenciler (yenilemeden 5 gün önce - 5 gün sonra)**")
+    if not yenileme_df.empty:
+        st.dataframe(yenileme_df, use_container_width=True, hide_index=True)
     else:
-        st.dataframe(df_g, use_container_width=True)
+        st.info("Yenileme tarihine ±5 gün penceresinde öğrenci bulunmuyor.")
 
-    with st.form("group_form"):
-        new_group = st.text_input("Yeni Grup Adı")
-        group_submitted = st.form_submit_button("Grup Ekle")
-        if group_submitted:
-            if add_group(new_group):
-                st.success("Grup eklendi. Liste yenilendi.")
-                st.rerun()
+
+elif secim == "Üye Yönetimi":
+    st.header("Üye Yönetimi")
+    if ogr.empty:
+        st.info("Henüz öğrenci bulunmuyor. Yeni bir öğrenci ekleyebilirsiniz.")
+
+    tab_ekle, tab_yenile, tab_duzenle, tab_sil = st.tabs([
+        "Yeni Üye Ekle",
+        "Kayıt Yenileme",
+        "Üyeyi Düzenle",
+        "Üye Sil",
+    ])
+
+    with tab_ekle:
+        ogr_df = st.session_state["ogr"]
+        mevcut_id_serisi = pd.to_numeric(ogr_df.get("ID"), errors="coerce") if "ID" in ogr_df.columns else pd.Series(dtype=float)
+        varsayilan_id = to_int(mevcut_id_serisi.max(), default=0) + 1
+        with st.form("yeni_ogrenci_form"):
+            col1, col2, col3 = st.columns(3)
+            yeni_id = col1.number_input("ID", min_value=1, value=varsayilan_id, step=1)
+            ad_soyad = col1.text_input("Ad Soyad")
+            veli_ad_soyad = col1.text_input("Veli Ad Soyad")
+            telefon = col1.text_input("Telefon")
+
+            dogum_tarihi = col2.text_input("Doğum Tarihi (YYYY-AA-GG)")
+            grup = col2.text_input("Grup")
+            seviye = col2.text_input("Seviye")
+            koc = col2.text_input("Koç")
+
+            baslangic_tarihi = col3.text_input("Başlangıç Tarihi (YYYY-AA-GG)")
+            son_odeme = col3.text_input("Son Ödeme Tarihi (YYYY-AA-GG)")
+            ucret = col3.number_input("Ücret (Aylık)", min_value=0.0, step=100.0, value=0.0)
+
+            uyelik_kodlari = list(UYELIK_LABELS.keys())
+            uyelik_tercihi = col3.selectbox("Üyelik Tercihi", uyelik_kodlari, format_func=lambda k: UYELIK_LABELS.get(k, ""))
+            uyelik_gun = col2.text_input("Üyelik Gün Tercihi")
+
+            aktif_durum_options = ["Aktif", "Dondurmuş", "Pasif"]
+            aktif_durumu = col3.selectbox("Aktif Durumu", aktif_durum_options, index=0)
+
+            ekle_submit = st.form_submit_button("Öğrenciyi Ekle")
+
+        if ekle_submit:
+            mevcut_idler = set(pd.to_numeric(ogr_df.get("ID"), errors="coerce").dropna().astype(int))
+            yeni_id_int = int(yeni_id)
+            if yeni_id_int in mevcut_idler:
+                st.error("Bu ID'ye sahip bir öğrenci zaten mevcut. Lütfen farklı bir ID girin.")
             else:
-                st.warning("Grup adı boş olamaz veya zaten mevcut.")
+                dogum_dt = parse_date_str(dogum_tarihi)
+                baslangic_dt = parse_date_str(baslangic_tarihi)
+                son_odeme_dt = parse_date_str(son_odeme)
+                yeni_kayit = {
+                    "ID": yeni_id_int,
+                    "AdSoyad": ad_soyad.strip(),
+                    "DogumTarihi": dogum_dt,
+                    "VeliAdSoyad": veli_ad_soyad.strip(),
+                    "Telefon": telefon.strip(),
+                    "Grup": grup.strip(),
+                    "Seviye": seviye.strip(),
+                    "Koc": koc.strip(),
+                    "Baslangic": baslangic_dt,
+                    "UcretAylik": float(ucret),
+                    "SonOdeme": son_odeme_dt,
+                    "Aktif": aktif_durumu == "Aktif",
+                    "AktifDurumu": aktif_durumu,
+                    "UyelikTercihi": int(uyelik_tercihi),
+                    "UyelikGunTercihi": uyelik_gun.strip(),
+                }
+                for col in BASE_COLS:
+                    yeni_kayit.setdefault(col, None)
+                st.session_state["ogr"] = pd.concat([ogr_df, pd.DataFrame([yeni_kayit])], ignore_index=True)
+                st.success("Öğrenci eklendi.")
+                st.experimental_rerun()
 
-    st.markdown("### Yeni / Güncelle")
-    student_records = df.to_dict("records")
-    select_options = {"— Yeni Öğrenci —": None}
-    for row in student_records:
-        label = f"#{int(row['id'])} • {str(row.get('ad') or '').strip()} {str(row.get('soyad') or '').strip()}"
-        select_options[label] = row
-
-    select_labels = list(select_options.keys())
-    if "student_select_label" not in st.session_state:
-        st.session_state.student_select_label = select_labels[0]
-    elif st.session_state.student_select_label not in select_labels:
-        st.session_state.student_select_label = select_labels[0]
-
-    selected_label = st.selectbox("ID (güncellemek için seçin)", options=select_labels, key="student_select_label")
-    selected_student = select_options.get(selected_label)
-    row_id = int(selected_student["id"]) if selected_student and selected_student.get("id") else 0
-    key_suffix = str(row_id) if row_id > 0 else "new"
-
-    ad_default = str(selected_student.get("ad", "")) if selected_student else ""
-    soyad_default = str(selected_student.get("soyad", "")) if selected_student else ""
-    veli_ad_default = str(selected_student.get("veli_ad", "")) if selected_student else ""
-    veli_tel_default = str(selected_student.get("veli_tel", "")) if selected_student else ""
-
-    group_names = df_g["ad"].tolist()
-    if group_names:
-        takim_default = str(selected_student.get("takim", "") or "") if selected_student else ""
-        takim_options = [""] + group_names
-        if takim_default and takim_default not in takim_options:
-            takim_options.append(takim_default)
-        takim_index = takim_options.index(takim_default) if takim_default in takim_options else 0
-    else:
-        takim_default = str(selected_student.get("takim", "")) if selected_student else ""
-        takim_options = []; takim_index = 0
-
-    default_kayit = date.today()
-    if selected_student:
-        kayit_val = selected_student.get("kayit_tarihi")
-        if isinstance(kayit_val, pd.Timestamp):
-            default_kayit = kayit_val.date()
-        elif isinstance(kayit_val, date):
-            default_kayit = kayit_val
-        elif isinstance(kayit_val, str) and kayit_val:
-            try: default_kayit = date.fromisoformat(kayit_val)
-            except ValueError: pass
-
-    default_dogum = date(2015, 1, 1)
-    if selected_student:
-        dogum_val = selected_student.get("dogum_tarihi")
-        if isinstance(dogum_val, str) and dogum_val:
-            try: default_dogum = date.fromisoformat(dogum_val)
-            except ValueError: pass
-
-    aktif_default = True
-    if selected_student:
-        try: aktif_default = bool(int(selected_student.get("aktif_mi", 1)))
-        except (TypeError, ValueError): aktif_default = True
-
-    uye_options = ["Aylık", "3 Aylık", "6 Aylık", "Senelik"]
-    uye_default = (selected_student.get("uye_tipi", "Aylık")
-                   if selected_student and selected_student.get("uye_tipi") in uye_options else "Aylık")
-    uye_index = uye_options.index(uye_default)
-
-    prev_label = st.session_state.get("student_form_prev_label")
-    if prev_label != selected_label:
-        st.session_state.student_form_prev_label = selected_label
-        st.session_state[f"student_form_ad_{key_suffix}"] = ad_default
-        st.session_state[f"student_form_soyad_{key_suffix}"] = soyad_default
-        st.session_state[f"student_form_veli_ad_{key_suffix}"] = veli_ad_default
-        st.session_state[f"student_form_veli_tel_{key_suffix}"] = veli_tel_default
-        st.session_state[f"student_form_takim_{key_suffix}"] = takim_default
-        st.session_state[f"student_form_takim_text_{key_suffix}"] = takim_default
-        st.session_state[f"student_form_kayit_{key_suffix}"] = default_kayit
-        st.session_state[f"student_form_dogum_{key_suffix}"] = default_dogum
-        st.session_state[f"student_form_aktif_{key_suffix}"] = aktif_default
-        st.session_state[f"student_form_uye_tipi_{key_suffix}"] = uye_default
-
-    with st.form("student_form"):
-        st.number_input("Seçilen Öğrenci ID", min_value=0, step=1, value=row_id, disabled=True)
-
-        ad = st.text_input("Ad", value=ad_default, key=f"student_form_ad_{key_suffix}")
-        soyad = st.text_input("Soyad", value=soyad_default, key=f"student_form_soyad_{key_suffix}")
-        veli_ad = st.text_input("Veli Adı", value=veli_ad_default, key=f"student_form_veli_ad_{key_suffix}")
-        veli_tel = st.text_input("Veli Telefonu (+90...)", value=veli_tel_default, key=f"student_form_veli_tel_{key_suffix}")
-
-        if group_names:
-            takim = st.selectbox("Grup Seçin", options=takim_options, index=takim_index,
-                                 format_func=lambda x: "— Grup seçin —" if x == "" else x,
-                                 key=f"student_form_takim_{key_suffix}")
+    with tab_duzenle:
+        ogr_df = st.session_state["ogr"]
+        if ogr_df.empty:
+            st.info("Düzenlenecek öğrenci bulunmuyor.")
         else:
-            takim = st.text_input("Grup (önce yukarıdan grup ekleyin)",
-                                  value=takim_default, key=f"student_form_takim_text_{key_suffix}")
+            secenekler = list(ogr_df.index)
+            secilen_indeks = st.selectbox(
+                "Düzenlenecek öğrenciyi seçin",
+                options=secenekler,
+                format_func=lambda idx: f"{ogr_df.loc[idx, 'ID']} - {ogr_df.loc[idx, 'AdSoyad']}"
+            )
+            satir = ogr_df.loc[secilen_indeks]
+            mevcut_uyelik = to_int(satir.get("UyelikTercihi"), default=0)
+            mevcut_aktif_durum = satir.get("AktifDurumu") or ("Aktif" if bool(satir.get("Aktif", True)) else "Pasif")
 
-        kayit = st.date_input("Kayıt Tarihi", value=default_kayit, key=f"student_form_kayit_{key_suffix}")
-        dogum = st.date_input("Doğum Tarihi", value=default_dogum, key=f"student_form_dogum_{key_suffix}")
-        aktif = st.checkbox("Aktif", value=aktif_default, key=f"student_form_aktif_{key_suffix}")
-        uye_tipi = st.selectbox("Üyelik Süresi", options=uye_options, index=uye_index, key=f"student_form_uye_tipi_{key_suffix}")
+            st.markdown("**Seçilen Üyenin Mevcut Bilgileri**")
+            gorunum = {col: format_display_value(satir.get(col)) for col in BASE_COLS if col in satir}
+            if gorunum:
+                st.dataframe(pd.DataFrame([gorunum]), use_container_width=True, hide_index=True)            
 
-        submitted = st.form_submit_button("Kaydet")
+            with st.form(f"duzenle_form_{secilen_indeks}"):
+                col1, col2, col3 = st.columns(3)
+                duzenle_id = col1.number_input("ID", min_value=1, value=to_int(satir.get("ID"), default=1), step=1)
+                duzenle_ad = col1.text_input("Ad Soyad", value=str(satir.get("AdSoyad") or ""))
+                duzenle_veli = col1.text_input("Veli Ad Soyad", value=str(satir.get("VeliAdSoyad") or ""))
+                duzenle_tel = col1.text_input("Telefon", value=str(satir.get("Telefon") or ""))
 
-        pending_key = "pending_delete_student"
-        if pending_key in st.session_state:
-            if int(st.session_state[pending_key]) <= 0 or int(row_id) <= 0 or st.session_state[pending_key] != int(row_id):
-                st.session_state.pop(pending_key, None)
+                duzenle_dogum = col2.text_input("Doğum Tarihi (YYYY-AA-GG)", value=date_to_str(satir.get("DogumTarihi")))
+                duzenle_grup = col2.text_input("Grup", value=str(satir.get("Grup") or ""))
+                duzenle_seviye = col2.text_input("Seviye", value=str(satir.get("Seviye") or ""))
+                duzenle_koc = col2.text_input("Koç", value=str(satir.get("Koc") or ""))
 
-        pending_for = st.session_state.get(pending_key)
-        show_confirm = pending_for and int(row_id) > 0 and pending_for == int(row_id)
+                duzenle_baslangic = col3.text_input("Başlangıç Tarihi (YYYY-AA-GG)", value=date_to_str(satir.get("Baslangic")))
+                duzenle_son_odeme = col3.text_input("Son Ödeme Tarihi (YYYY-AA-GG)", value=date_to_str(satir.get("SonOdeme")))
+                duzenle_ucret = col3.number_input("Ücret (Aylık)", min_value=0.0, step=100.0, value=float(pd.to_numeric(satir.get("UcretAylik"), errors="coerce") or 0.0))
 
-        if show_confirm:
-            st.warning("Seçili öğrenciyi silmek istediğinizden emin misiniz?", icon="⚠️")
-            confirm_delete = st.form_submit_button("Evet, Sil", type="primary")
-            cancel_delete = st.form_submit_button("Vazgeç")
-            if confirm_delete:
-                if delete_student(int(row_id)):
-                    st.session_state.pop(pending_key, None)
-                    st.session_state.pop("student_form_prev_label", None)
-                    st.success("Öğrenci kaydı silindi. Liste yenilendi.")
-                    st.rerun()
+                uyelik_tercihi_duzenle = col3.selectbox("Üyelik Tercihi", list(UYELIK_LABELS.keys()), index=list(UYELIK_LABELS.keys()).index(mevcut_uyelik) if mevcut_uyelik in UYELIK_LABELS else 0, format_func=lambda k: UYELIK_LABELS.get(k, ""))
+                duzenle_uyelik_gun = col2.text_input("Üyelik Gün Tercihi", value=str(satir.get("UyelikGunTercihi") or ""))
+                duzenle_uyelik_yenileme = col2.text_input("Üyelik Yenileme Tercihi", value=str(satir.get("UyelikYenilemeTercihi") or ""))
+
+                aktif_durum_options = ["Aktif", "Dondurmuş", "Pasif"]
+                aktif_index = aktif_durum_options.index(mevcut_aktif_durum) if mevcut_aktif_durum in aktif_durum_options else 0
+                duzenle_aktif_durum = col3.selectbox("Aktif Durumu", aktif_durum_options, index=aktif_index)
+
+                duzenle_submit = st.form_submit_button("Değişiklikleri Kaydet")
+
+            if duzenle_submit:
+                duzenle_id_int = int(duzenle_id)
+                mevcut_idler = set(pd.to_numeric(ogr_df.get("ID"), errors="coerce").dropna().astype(int)) - {int(pd.to_numeric(satir.get("ID"), errors="coerce") or 0)}
+                if duzenle_id_int in mevcut_idler:
+                    st.error("Bu ID başka bir öğrenciye ait. Lütfen farklı bir ID seçin.")
                 else:
-                    st.warning("Belirtilen ID ile öğrenci bulunamadı.")
-                    st.session_state.pop(pending_key, None)
-                    st.rerun()
-            elif cancel_delete:
-                st.session_state.pop(pending_key, None)
-                st.rerun()
+                    guncel_df = ogr_df.copy()
+                    guncel_df.loc[secilen_indeks, "ID"] = duzenle_id_int
+                    guncel_df.loc[secilen_indeks, "AdSoyad"] = duzenle_ad.strip()
+                    guncel_df.loc[secilen_indeks, "DogumTarihi"] = parse_date_str(duzenle_dogum)
+                    guncel_df.loc[secilen_indeks, "VeliAdSoyad"] = duzenle_veli.strip()
+                    guncel_df.loc[secilen_indeks, "Telefon"] = duzenle_tel.strip()
+                    guncel_df.loc[secilen_indeks, "Grup"] = duzenle_grup.strip()
+                    guncel_df.loc[secilen_indeks, "Seviye"] = duzenle_seviye.strip()
+                    guncel_df.loc[secilen_indeks, "Koc"] = duzenle_koc.strip()
+                    guncel_df.loc[secilen_indeks, "Baslangic"] = parse_date_str(duzenle_baslangic)
+                    guncel_df.loc[secilen_indeks, "UcretAylik"] = float(duzenle_ucret)
+                    guncel_df.loc[secilen_indeks, "SonOdeme"] = parse_date_str(duzenle_son_odeme)
+                    guncel_df.loc[secilen_indeks, "AktifDurumu"] = duzenle_aktif_durum
+                    guncel_df.loc[secilen_indeks, "Aktif"] = duzenle_aktif_durum == "Aktif"
+                    guncel_df.loc[secilen_indeks, "UyelikTercihi"] = int(uyelik_tercihi_duzenle)
+                    guncel_df.loc[secilen_indeks, "UyelikGunTercihi"] = duzenle_uyelik_gun.strip()
+                    guncel_df.loc[secilen_indeks, "UyelikYenilemeTercihi"] = duzenle_uyelik_yenileme.strip()
+                    st.session_state["ogr"] = guncel_df.reset_index(drop=True)
+                    st.success("Öğrenci bilgileri güncellendi.")
+                    st.experimental_rerun()
+
+    with tab_yenile:
+        ogr_df = st.session_state["ogr"]
+        if ogr_df.empty:
+            st.info("Yenileme yapabilecek öğrenci bulunmuyor.")
         else:
-            if st.form_submit_button("Seçili Öğrenciyi Sil", type="primary"):
-                if int(row_id) <= 0:
-                    st.warning("Silmek için geçerli bir ID girin.")
+            ogr_sec_options = list(ogr_df.index)
+
+            with st.form("kayit_yenile_form"):
+                secilen_indeks = st.selectbox(
+                    "Yenilenecek öğrenciyi seçin",
+                    options=ogr_sec_options,
+                    format_func=lambda idx: f"{ogr_df.loc[idx, 'ID']} - {ogr_df.loc[idx, 'AdSoyad']}",
+                )
+
+                satir = ogr_df.loc[secilen_indeks]
+                mevcut_baslangic = coerce_date_value(satir.get("Baslangic"))
+                mevcut_uyelik = to_int(satir.get("UyelikTercihi"), default=0)
+                varsayilan_tarih = add_months(mevcut_baslangic, UYELIK_AY.get(mevcut_uyelik, 0))
+                if varsayilan_tarih is None:
+                    varsayilan_tarih = dt.date.today()
+
+                yenileme_tarihi = st.date_input(
+                    "Yenileme Tarihi",
+                    value=varsayilan_tarih,
+                    help="Yenilenecek dönemin başlangıç tarihini seçin.",
+                )
+
+                uyelik_sec_options = list(UYELIK_LABELS.keys())
+                uyelik_index = uyelik_sec_options.index(mevcut_uyelik) if mevcut_uyelik in uyelik_sec_options else 0
+                secilen_uyelik = st.selectbox(
+                    "Üyelik Tercihi",
+                    options=uyelik_sec_options,
+                    index=uyelik_index,
+                    format_func=lambda k: UYELIK_LABELS.get(k, ""),
+                    help="Yeni üyelik süresini seçin.",
+                )
+
+                yenile_submit = st.form_submit_button("Kayıt Yenile")
+
+            if yenile_submit:
+                yenileme_ay = UYELIK_AY.get(int(secilen_uyelik), 0)
+                yeni_son_odeme = add_months(yenileme_tarihi, yenileme_ay) if yenileme_ay else None
+
+                guncel_df = ogr_df.copy()
+                guncel_df.loc[secilen_indeks, "Baslangic"] = yenileme_tarihi
+                guncel_df.loc[secilen_indeks, "UyelikTercihi"] = int(secilen_uyelik)
+                guncel_df.loc[secilen_indeks, "SonOdeme"] = yeni_son_odeme
+                guncel_df.loc[secilen_indeks, "UyelikYenilemeTercihi"] = yenileme_tarihi.isoformat()
+                guncel_df.loc[secilen_indeks, "AktifDurumu"] = "Aktif"
+                guncel_df.loc[secilen_indeks, "Aktif"] = True
+
+                st.session_state["ogr"] = guncel_df.reset_index(drop=True)
+
+                if yeni_son_odeme:
+                    st.success(
+                        f"{satir.get('AdSoyad')} için yenileme tamamlandı. Yeni son ödeme tarihi: {yeni_son_odeme.isoformat()}."
+                    )
                 else:
-                    st.session_state[pending_key] = int(row_id)
-                    st.rerun()
+                    st.success(f"{satir.get('AdSoyad')} için yenileme tamamlandı.")
 
-        if submitted:
-            payload = {
-                "ad": ad.strip(), "soyad": soyad.strip(),
-                "veli_ad": veli_ad.strip(), "veli_tel": veli_tel.strip(),
-                "takim": takim.strip(), "kayit_tarihi": kayit.isoformat(),
-                "dogum_tarihi": dogum.isoformat(),
-                "uye_tipi": uye_tipi,
-                "aktif_mi": 1 if aktif else 0
-            }
-            upsert_student(payload, row_id if row_id>0 else None)
-            st.success("Öğrenci kaydı kaydedildi. Liste yenilendi.")
-            st.rerun()
+                st.experimental_rerun()
 
-elif selected_menu == "🧾 Faturalar":
-    st.header("🧾 Faturalar")
 
-    df = df_invoices()
-    st.dataframe(df, use_container_width=True)
+    with tab_sil:
+        ogr_df = st.session_state["ogr"]
+        if ogr_df.empty:
+            st.info("Silinecek öğrenci bulunmuyor.")
+        else:
+            silinecekler = st.multiselect(
+                "Silinecek öğrencileri seçin",
+                options=list(ogr_df.index),
+                format_func=lambda idx: f"{ogr_df.loc[idx, 'ID']} - {ogr_df.loc[idx, 'AdSoyad']}"
+            )
+            if st.button("Seçilen Öğrencileri Sil"):
+                if not silinecekler:
+                    st.warning("Silmek için en az bir öğrenci seçin.")
+                else:
+                    guncel_df = ogr_df.drop(index=silinecekler).reset_index(drop=True)
+                    st.session_state["ogr"] = guncel_df
+                    st.success("Seçilen öğrenciler silindi.")
+                    st.experimental_rerun()
 
-    st.markdown("### Fatura Ekle")
-    colA, colB, colC, colD = st.columns(4)
-    with colA:
-        student_id = st.number_input("Öğrenci ID", min_value=1, step=1)
-    with colB:
-        donem = st.text_input("Dönem (örn: 2025-10)")
-    with colC:
-        tutar = st.number_input("Tutar (TL)", min_value=0.0, step=50.0)
-    with colD:
-        vade = st.date_input("Son Ödeme Tarihi", value=date.today())
-    if st.button("Fatura Oluştur"):
-        add_invoice(student_id, donem, tutar, vade.isoformat())
-        st.success("Fatura eklendi. Liste yenilendi.")
-        st.rerun()
 
-    st.markdown("### Ödeme Al")
-    col1, col2 = st.columns(2)
-    with col1:
-        inv_id = st.number_input("Fatura ID", min_value=1, step=1)
-    with col2:
-        odeme_tutar = st.number_input("Ödenen Tutar", min_value=0.0, step=50.0)
-    if st.button("Ödendi İşaretle"):
-        mark_paid(inv_id, odeme_tutar)
-        st.success("Fatura ödendi olarak işaretlendi. Liste yenilendi.")
-        st.rerun()
-
-elif selected_menu == "📲 WhatsApp Gönder":
-    st.header("📲 WhatsApp Gönder")
-
-    df = df_invoices()
-    overdue = df[(df["durum"] == "gecikti") & df["veli_tel"].notna()].copy()
-    if overdue.empty:
-        st.info("Vadesi geçen aidat bulunmuyor.")
-        st.session_state.whatsapp_overdue_selected = set()
+elif secim == "Tüm Üyelikler":
+    st.header("Tüm Üyelikler")
+    if exp_df.empty:
+        st.info("Gösterilecek üyelik bulunamadı.")
     else:
-        if "whatsapp_overdue_selected" not in st.session_state:
-            st.session_state.whatsapp_overdue_selected = set()
+        durum_options = ["Aktif", "Pasif", "Dondurmuş"]
+        grup_degerleri = [g for g in exp_df.get("Grup", pd.Series(dtype=object)).dropna() if str(g).strip()]
+        group_options = sorted(set(grup_degerleri), key=lambda g: str(g))
+        preference_options = [UYELIK_LABELS[k] for k in sorted(UYELIK_LABELS.keys())]
+        extra_preferences = sorted({p for p in exp_df.get("UyelikTercihiAd", pd.Series(dtype=object)).dropna() if p not in preference_options}, key=lambda p: str(p))
+        preference_options.extend(extra_preferences)
 
-        current_ids = set(int(x) for x in overdue["id"].tolist())
-        st.session_state.whatsapp_overdue_selected = {sid for sid in st.session_state.whatsapp_overdue_selected if sid in current_ids}
-
-        all_selected = (len(st.session_state.whatsapp_overdue_selected) == len(current_ids) and len(current_ids) > 0)
-        select_all = st.checkbox("Tümünü Seç", value=all_selected, key="select_all_overdue")
-        if select_all and not all_selected:
-            st.session_state.whatsapp_overdue_selected = set(current_ids)
-        elif not select_all and all_selected:
-            st.session_state.whatsapp_overdue_selected = set()
-
-        display_df = overdue[["id","ad","soyad","donem","tutar","son_odeme_tarihi","veli_tel"]].copy()
-        display_df.rename(columns={
-            "id":"Fatura ID","ad":"Ad","soyad":"Soyad","donem":"Dönem",
-            "tutar":"Tutar","son_odeme_tarihi":"Son Ödeme Tarihi","veli_tel":"Veli Telefonu",
-        }, inplace=True)
-        display_df["Seç"] = display_df["Fatura ID"].apply(lambda x: int(x) in st.session_state.whatsapp_overdue_selected)
-
-        edited_df = st.data_editor(
-            display_df,
-            column_config={
-                "Seç": st.column_config.CheckboxColumn("Seç", default=False),
-                "Tutar": st.column_config.NumberColumn("Tutar", format="%d TL"),
-            },
-            hide_index=True,
-            disabled=["Fatura ID","Ad","Soyad","Dönem","Tutar","Son Ödeme Tarihi","Veli Telefonu"],
-            use_container_width=True,
-            key="overdue_editor",
+        filt_col1, filt_col2, filt_col3 = st.columns(3)
+        secilen_durumlar = filt_col1.multiselect(
+            "Üyelik durumu", durum_options, placeholder="Seçiniz"
+        )
+        secilen_gruplar = filt_col2.multiselect(
+            "Grup", group_options, placeholder="Seçiniz"
+        )
+        secilen_tercihler = filt_col3.multiselect(
+            "Üyelik tercihi", preference_options, placeholder="Seçiniz"
         )
 
-        selected_ids = [int(row["Fatura ID"]) for _, row in edited_df.iterrows() if bool(row.get("Seç"))]
-        st.session_state.whatsapp_overdue_selected = set(selected_ids)
+        filtreli_df = exp_df.copy()
+        if secilen_durumlar:
+            filtreli_df = filtreli_df[filtreli_df["UyelikDurumu"].isin(secilen_durumlar)]
+        if secilen_gruplar:
+            filtreli_df = filtreli_df[filtreli_df["Grup"].isin(secilen_gruplar)]
+        if secilen_tercihler:
+            filtreli_df = filtreli_df[filtreli_df["UyelikTercihiAd"].isin(secilen_tercihler)]
 
-        message_text = "Sayın velimiz Lütfen geciken ödemenizi en kısa sürede yapınız."
-        st.markdown(f"**Gönderilecek Mesaj:** {message_text}")
-
-        if st.button("Seçili Velilere Mesaj Gönder"):
-            if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
-                st.error("WhatsApp ayarları eksik (token / phone number id).")
-            else:
-                if not selected_ids:
-                    st.warning("Lütfen mesaj göndermek için listeden en az bir veli seçin.")
-                else:
-                    phones = [
-                        str(x).strip()
-                        for x in overdue[overdue["id"].isin(selected_ids)]["veli_tel"].tolist()
-                        if pd.notna(x) and str(x).strip()
-                    ]
-                    if not phones:
-                        st.warning("Seçilen kayıtlar için geçerli veli telefonu bulunamadı.")
-                    else:
-                        sent = failed = 0; error_msgs: List[str] = []
-                        for phone in phones:
-                            resp = send_text(phone, message_text)
-                            status = _response_status_label(resp)
-                            log_msg(phone, "-", "text", message_text, status)
-                            if status == "ok":
-                                sent += 1
-                            else:
-                                failed += 1
-                                error_msgs.append(f"{phone}: {_response_error_message(resp)}")
-                            time.sleep(1)
-                        st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-                        if error_msgs:
-                            st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
-
-elif selected_menu == "🧾 Log":
-    st.header("🧾 Mesaj Kayıtları")
-    conn = get_conn()
-    df_log = pd.read_sql_query("SELECT * FROM msg_log ORDER BY id DESC LIMIT 500", conn)
-    conn.close()
-    st.dataframe(df_log, use_container_width=True)
-
-elif selected_menu == "🎉 Özel Günler":
-    st.header("🎉 Özel Gün Mesajları")
-    st.caption("Doğum günü ve resmi/kurumsal günler için hızlı gönderim.")
-    df_s = df_students()
-    today_mmdd = (date.today().month, date.today().day)
-    df_birth = df_s[df_s["dogum_tarihi"].apply(lambda x: (int(x[5:7]), int(x[8:10])) == today_mmdd if isinstance(x,str) and len(x)>=10 else False)]
-    st.subheader("🎂 Bugün doğum günü olan öğrenciler")
-    st.dataframe(df_birth, use_container_width=True)
-
-    bmsg = st.text_area("Doğum günü mesajı", value="İyi ki doğdun! 🎂 Antrenmanda minik bir sürprizimiz var. ⚽️✨")
-    bday_phones: List[str] = []
-    phones = ""
-    if "veli_tel" in df_birth.columns:
-        bday_phones = [str(x).strip() for x in df_birth["veli_tel"].tolist() if pd.notna(x) and str(x).strip()]
-        phones = ",".join(bday_phones)
-    elif not df_birth.empty:
-        st.warning("Seçilen öğrenciler için veli telefonu bulunamadı.")
-    st.text_input("Hedef telefonlar", value=phones, key="bday_phones", disabled=True)
-
-    if st.button("Doğum Günü Mesajlarını Gönder"):
-        if not (WHATSAPP_TOKEN and WABA_PHONE_NUMBER_ID):
-            st.error("WhatsApp ayarları eksik (token / phone number id).")
+        st.subheader("Üyelik listesi")
+        if filtreli_df.empty:
+            st.warning("Seçtiğiniz filtrelere uygun üyelik bulunamadı.")
         else:
-            if not bday_phones:
-                st.error("Gönderilecek veli telefonu bulunamadı.")
+            st.dataframe(filtreli_df, use_container_width=True, hide_index=True)
+
+        if not filtreli_df.empty and "KalanGun" in filtreli_df.columns:
+            kalan_gun_serisi = pd.to_numeric(filtreli_df["KalanGun"], errors="coerce")
+        else:
+            kalan_gun_serisi = pd.Series(dtype="float64", index=filtreli_df.index)
+        expiring_mask = kalan_gun_serisi.between(0, 5, inclusive="both") if not kalan_gun_serisi.empty else pd.Series([], dtype=bool)
+        expired_mask = kalan_gun_serisi.between(-5, -1, inclusive="both") if not kalan_gun_serisi.empty else pd.Series([], dtype=bool)
+
+        tab1, tab2 = st.tabs(["5 Gün İçinde Bitecek", "5 Gündür Geciken"])
+        with tab1:
+            st.subheader("Üyeliği bitmeye 5 gün kalanlar")
+            if not filtreli_df.empty and expiring_mask.any():
+                st.dataframe(filtreli_df[expiring_mask], use_container_width=True, hide_index=True)
             else:
-                sent = failed = 0; error_msgs: List[str] = []
-                for p in bday_phones:
-                    if not p: continue
-                    resp = send_text(p, bmsg)
-                    status = _response_status_label(resp)
-                    log_msg(p, "-", "text", bmsg, status)
-                    if status=="ok":
-                        sent += 1
-                    else:
-                        failed += 1
-                        error_msgs.append(f"{p}: {_response_error_message(resp)}")
-                    time.sleep(1)
-                st.success(f"Tamamlandı. Başarılı: {sent}, Hata: {failed}")
-                if error_msgs:
-                    st.warning("\n".join(["Gönderilemeyenler:"] + [f"- {msg}" for msg in error_msgs]))
+                st.info("Seçili filtrelerde 5 gün içinde bitecek üyelik bulunamadı.")
+        with tab2:
+            st.subheader("Üyeliği bitişinin üzerinden 5 gün geçenler")
+            if not filtreli_df.empty and expired_mask.any():
+                st.dataframe(filtreli_df[expired_mask], use_container_width=True, hide_index=True)
+            else:
+                st.info("Seçili filtrelerde son 5 gün içinde süresi dolmuş üyelik bulunamadı.")
+
+elif secim == "İstatistikler":
+    st.header("İstatistikler")
+    if ogr.empty:
+        st.info("Henüz öğrenci bulunmuyor. Önce veri yükleyin veya öğrenci ekleyin.")
+    else:
+        yas_serisi = ogr.get("DogumTarihi", pd.Series(dtype=object)).apply(
+            lambda v: compute_age(v, _today)
+        )
+        yas_serisi = pd.to_numeric(yas_serisi, errors="coerce")
+
+        yas_gruplari = pd.cut(
+            yas_serisi,
+            bins=[0, 7, 10, 13, 16, 19, 200],
+            labels=["0-6", "7-9", "10-12", "13-15", "16-18", "19+"],
+            right=False,
+        )
+        yas_df = (
+            yas_gruplari.value_counts(dropna=False)
+            .rename_axis("YasGrubu")
+            .reset_index(name="Sayi")
+        )
+        if not yas_df.empty:
+            yas_df["YasGrubu"] = (
+                yas_df["YasGrubu"].astype(str).replace({"nan": "Belirtilmedi"})
+            )
+            toplam = yas_df["Sayi"].sum()
+            if toplam > 0:
+                yas_df["Yuzde"] = (yas_df["Sayi"] / toplam * 100).round(1)
+
+        uyelik_serisi = pd.to_numeric(
+            ogr.get("UyelikTercihi", pd.Series(dtype=object)), errors="coerce"
+        )
+        uyelik_serisi = uyelik_serisi.fillna(0).clip(lower=0, upper=4).astype(int)
+        uyelik_etiketleri = (
+            uyelik_serisi.map(UYELIK_LABELS).replace({"": "Belirtilmedi"}).fillna("Belirtilmedi")
+        )
+        uyelik_df = (
+            uyelik_etiketleri.value_counts()
+            .rename_axis("UyelikTercihi")
+            .reset_index(name="Sayi")
+        )
+        if not uyelik_df.empty:
+            toplam_uyelik = uyelik_df["Sayi"].sum()
+            if toplam_uyelik > 0:
+                uyelik_df["Yuzde"] = (uyelik_df["Sayi"] / toplam_uyelik * 100).round(1)
+
+        kol1, kol2 = st.columns(2)
+
+        with kol1:
+            st.subheader("Yaş Grupları Dağılımı")
+            if yas_df.empty or yas_df["Sayi"].sum() == 0:
+                st.info("Yaş grubu hesaplamak için geçerli doğum tarihi bulunamadı.")
+            else:
+                yas_chart = (
+                    alt.Chart(yas_df)
+                    .mark_arc()
+                    .encode(
+                        theta=alt.Theta(field="Sayi", type="quantitative"),
+                        color=alt.Color(field="YasGrubu", type="nominal"),
+                        tooltip=[
+                            alt.Tooltip("YasGrubu:N", title="Yaş Grubu"),
+                            alt.Tooltip("Sayi:Q", title="Öğrenci"),
+                            alt.Tooltip("Yuzde:Q", title="Oran (%)"),
+                        ],
+                    )
+                )
+                st.altair_chart(yas_chart, use_container_width=True)
+                st.dataframe(yas_df, use_container_width=True, hide_index=True)
+
+        with kol2:
+            st.subheader("Üyelik Tercihi Dağılımı")
+            if uyelik_df.empty or uyelik_df["Sayi"].sum() == 0:
+                st.info("Üyelik tercihi verisi bulunamadı.")
+            else:
+                uyelik_chart = (
+                    alt.Chart(uyelik_df)
+                    .mark_arc()
+                    .encode(
+                        theta=alt.Theta(field="Sayi", type="quantitative"),
+                        color=alt.Color(field="UyelikTercihi", type="nominal"),
+                        tooltip=[
+                            alt.Tooltip("UyelikTercihi:N", title="Üyelik"),
+                            alt.Tooltip("Sayi:Q", title="Öğrenci"),
+                            alt.Tooltip("Yuzde:Q", title="Oran (%)"),
+                        ],
+                    )
+                )
+                st.altair_chart(uyelik_chart, use_container_width=True)
+                st.dataframe(uyelik_df, use_container_width=True, hide_index=True)
+
+
+elif secim == "Dışa Aktarım":
+    st.header("Dışa Aktarım")
+    excel_bytes = write_excel(ogr, yok, tah)
+    st.download_button(
+        "Excel'i indir",
+        data=excel_bytes,
+        file_name=f"futbol_okulu_{dt.date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.caption("Otomatik başlık tespiti aktif. Sheet adı: fark etmez (örn. 'students').")
