@@ -148,14 +148,20 @@ def import_sheet1_wide_excel_to_db(path_or_buffer: str | os.PathLike[str] | IO[b
     )""")
     conn.commit()
 
-    # a) öğrencileri ekle
+    # a) grup kayıtlarını güncelle
+    unique_groups = sorted({str(g).strip() for g in df["GRUP_ADI"].tolist() if str(g).strip()})
+    if unique_groups:
+        c.executemany("INSERT OR IGNORE INTO groups(ad) VALUES(?)", ((g,) for g in unique_groups))
+        conn.commit()
+
+    # b) öğrencileri ekle
     for _, r in students.iterrows():
         c.execute("""INSERT INTO students(ad, soyad, veli_ad, veli_tel, takim, kayit_tarihi, dogum_tarihi, aktif_mi, uye_tipi)
                      VALUES(?,?,?,?,?,?,?,?,?)""",
                   (r["ad"], r["soyad"], "", r["veli_tel"], r["takim"], None, r["dogum_tarihi"], int(r["aktif_mi"]), "Aylık"))
     conn.commit()
 
-    # b) id eşlemesi ve faturalar
+    # c) id eşlemesi ve faturalar
     students_db = pd.read_sql_query("SELECT id, ad, takim FROM students", conn)
     merged2 = melted.merge(students_db, left_on=["ADI_SOYADI","GRUP_ADI"], right_on=["ad","takim"], how="left")
 
