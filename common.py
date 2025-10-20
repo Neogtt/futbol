@@ -1,41 +1,111 @@
-Mevcut Durum
-Uygulama tek bir crm.py dosyasında çalışıyor ve sabit kullanıcı listesiyle giriş yapılıyor.
+"""Shared authentication and session utilities for Streamlit multi-page app."""
+from __future__ import annotations
 
-Oturum durumuna göre sayfa yeniden çiziliyor; yetkiye göre farklı ekran ayrımı yapılmıyor.
+import datetime as dt
+from dataclasses import dataclass
+from typing import Dict, Optional
 
-Streamlit ile Ayrı “Koç Girişi” Uygulaması Seçenekleri
-Ayrı dosya (ör. coach_app.py)
+import pandas as pd
+import streamlit as st
 
-Streamlit’in çoklu dosya yaklaşımından yararlanarak koçlara özel arayüzü bağımsız olarak sunabilirsiniz.
 
-streamlit run coach_app.py komutuyla yalnızca koç işlevlerine odaklanan hafif bir arayüz sağlarsınız.
+@dataclass(frozen=True)
+class User:
+    username: str
+    password: str
+    role: str
+    display_name: str
+    coach_code: Optional[str] = None
 
-Ortak kodları (veri erişimi, Google Drive senkronizasyonu vb.) yeniden kullanmak için ayrı bir yardımcı modül (ör. common.py) çıkarmak gerekir.
 
-Tek proje içinde çoklu sayfa
+USERS: Dict[str, User] = {
+    "crm_admin": User(username="crm_admin", password="crm123", role="crm", display_name="CRM Yöneticisi"),
+    "coach_ahmet": User(
+        username="coach_ahmet",
+        password="coach123",
+        role="coach",
+        display_name="Koç Ahmet",
+        coach_code="Ahmet",
+    ),
+}
 
-Streamlit 1.10+ sürümünden itibaren klasör bazlı çoklu sayfa desteği var. pages/01_CRM.py (ana uygulama) ve pages/02_Koc.py (koç) gibi yapılandırabilirsiniz.
+ROLE_PAGES = {
+    "crm": "pages/01_CRM.py",
+    "coach": "pages/02_Koc.py",
+}
 
-st.session_state.user değerini kullanarak giriş yapan kullanıcının rolüne göre st.switch_page("pages/02_Koc.py") çağrısıyla yönlendirme yapabilirsiniz.
 
-Bu yaklaşım tek komutla (streamlit run crm.py) her iki rolü de barındırır; dağıtımı kolaylaştırır.
+def authenticate_user(username: str, password: str) -> Optional[User]:
+    user = USERS.get(username)
+    if user and password == user.password:
+        return user
+    return None
 
-Aynı sayfa içinde yetki tabanlı içerik
 
-Ek bir dosya açmadan, giriş sonrasında kullanıcı rolünü USERS sözlüğüne ek bir alanla (örn. {"export1": {"password": "...", "role": "crm"}, ...}) taşıyıp, rol coach ise koşullu olarak farklı layout gösterebilirsiniz.
+def start_user_session(user: User) -> None:
+    st.session_state["authenticated"] = True
+    st.session_state["username"] = user.username
+    st.session_state["role"] = user.role
+    st.session_state["display_name"] = user.display_name
+    if user.coach_code:
+        st.session_state["coach_code"] = user.coach_code
 
-Bu yöntem kodu tek dosyada tutar ancak büyüdükçe okunabilirliği zorlaştırabilir.
 
-Önerilen Adımlar
-Rol yönetimi ekleyin: USERS sözlüğünü role bilgisi içerecek şekilde genişletin, girişte st.session_state.role alanını set edin.
+def end_user_session() -> None:
+    for key in ["authenticated", "username", "role", "display_name"]:
+        st.session_state.pop(key, None)
+    st.session_state.pop("coach_code", None)
 
-Modülerleştirme: Ortak veri çekme/senkronizasyon fonksiyonlarını bir modüle taşıyarak hem ana CRM hem koç arayüzünün kullanmasını sağlayın.
 
-Streamlit çoklu sayfa veya ayrı dosya kararı:
+def get_current_user() -> Optional[Dict[str, str]]:
+    if not st.session_state.get("authenticated"):
+        return None
+    return {
+        "username": st.session_state.get("username"),
+        "role": st.session_state.get("role"),
+        "display_name": st.session_state.get("display_name", st.session_state.get("username")),
+        "coach_code": st.session_state.get("coach_code"),
+    }
 
-Tek sunucu, farklı yetkiler isteniyorsa çoklu sayfa.
 
-Tamamen bağımsız dağıtım isteniyorsa ayrı coach_app.py.
+def require_role(role: str) -> None:
+    user = get_current_user()
+    if user and user.get("role") == role:
+        return
+    st.warning("Bu sayfaya erişim yetkiniz yok. Giriş ekranına yönlendiriliyorsunuz.")
+    st.switch_page("crm.py")
+    st.stop()
 
-Sonuç
-Streamlit ile koç girişi için ayrı bir uygulama yapmak mümkün; hatta çoklu sayfa veya bağımsız dosya yaklaşımıyla daha temiz bir rol ayrımı sağlanır. Mevcut giriş sistemi üzerinde küçük düzenlemelerle rol bazlı yönlendirme eklemeniz yeterli olacaktır.
+
+def render_logout_button(label: str = "Oturumu Kapat") -> None:
+    if st.sidebar.button(label, type="secondary"):
+        end_user_session()
+        st.experimental_rerun()
+
+
+def get_role_target(role: str) -> Optional[str]:
+    return ROLE_PAGES.get(role)
+
+
+def ensure_dataframes_initialized() -> None:
+    if "ogr" not in st.session_state:
+        st.session_state["ogr"] = pd.DataFrame([
+            {
+                "ID": 1,
+                "AdSoyad": "Demo Öğrenci",
+                "Telefon": "0533",
+                "Grup": "U10",
+                "Seviye": "Başlangıç",
+                "Koc": "Ahmet",
+                "Baslangic": dt.date(2025, 9, 1),
+                "UcretAylik": 1500,
+                "SonOdeme": dt.date(2025, 10, 1),
+                "Aktif": True,
+                "AktifDurumu": "Aktif",
+                "UyelikTercihi": 1,
+            }
+        ])
+    if "yok" not in st.session_state:
+        st.session_state["yok"] = pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])
+    if "tah" not in st.session_state:
+        st.session_state["tah"] = pd.DataFrame(columns=["Tarih", "OgrenciID", "AdSoyad", "Koc", "Tutar", "Aciklama"])
