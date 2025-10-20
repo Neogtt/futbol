@@ -16,6 +16,12 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
+from common import (
+    ensure_dataframes_initialized,
+    get_current_user,
+    render_logout_button,
+    require_role,
+)
 
 # ==========================
 # Normalizasyon
@@ -307,8 +313,14 @@ def compute_age(birth_value, today: date) -> Optional[int]:
 # Uygulama
 # ==========================
 
-st.set_page_config(page_title="Futbol Okulu", page_icon="⚽", layout="wide")
-st.sidebar.title("⚽ Futbol Okulu — Otomatik Başlık")
+require_role("crm")
+
+user_info = get_current_user()
+sidebar_title = "⚽ Futbol Okulu — Otomatik Başlık"
+st.sidebar.title(sidebar_title)
+if user_info:
+    st.sidebar.caption(f"Giriş yapan: **{user_info['display_name']}**")
+render_logout_button()
 
 uploaded = st.sidebar.file_uploader("Excel yükle (.xlsx)", type=["xlsx"])
 if uploaded:
@@ -317,15 +329,7 @@ if uploaded:
     st.session_state["yok"] = yok_yuklu
     st.session_state["tah"] = tah_yuklu
     st.sidebar.success(f"Yüklenen sayfa: {used_sheet}")
-if "ogr" not in st.session_state:
-    st.session_state["ogr"] = pd.DataFrame([
-        {"ID":1,"AdSoyad":"Demo Öğrenci","Telefon":"0533","Grup":"U10","Seviye":"Başlangıç","Koc":"Ahmet",
-         "Baslangic":dt.date(2025,9,1),"UcretAylik":1500,"SonOdeme":dt.date(2025,10,1),"Aktif":True,"AktifDurumu":"Aktif","UyelikTercihi":1}
-    ])
-if "yok" not in st.session_state:
-    st.session_state["yok"] = pd.DataFrame(columns=["Tarih","Grup","OgrenciID","AdSoyad","Koc","Katildi","Not"])
-if "tah" not in st.session_state:
-    st.session_state["tah"] = pd.DataFrame(columns=["Tarih","OgrenciID","AdSoyad","Koc","Tutar","Aciklama"])
+ensure_dataframes_initialized()
 
 ogr = st.session_state["ogr"]
 yok = st.session_state["yok"]
