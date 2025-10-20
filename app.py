@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import gspread
+from gspread.exceptions import GSpreadException
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import hashlib
@@ -88,7 +89,15 @@ def verify_password(users: Dict[str, Dict], username: str, password: str) -> boo
 
 @st.cache_data(show_spinner=False)
 def load_yoklama() -> pd.DataFrame:
-    ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+    try:
+        ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+    except GSpreadException as exc:
+        st.error(
+            "Google Sheet'e bağlanırken bir hata oluştu. Lütfen kimlik bilgilerinizi ve sayfa erişiminizi kontrol edin.\n\n"
+            f"Detay: {exc}"
+        )
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])
+        
     df = pd.DataFrame(ws.get_all_records())
     if df.empty:
         return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])    
@@ -103,7 +112,13 @@ def load_yoklama() -> pd.DataFrame:
 
 
 def append_yoklama_rows(records: List[Dict]):
-    ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+    try:
+        ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+    except GSpreadException as exc:
+        raise RuntimeError(
+            "Google Sheet'e yazılırken bir hata oluştu. Kimlik bilgilerinizi ve sayfa erişim izinlerinizi doğrulayın."
+        ) from exc
+        
     # Başlık yoksa yaz
     all_values = ws.get_all_values()
     if not all_values:
