@@ -21,7 +21,7 @@ SCOPES = [
 ]
 
 # 👉 Doğrudan KEY ile açıyoruz (kullanıcının verdiği Sheet ID)
-DEFAULT_SHEET_KEY = "1EX6e_r6MaPKh6xi03gmOvhVPHFEsSyuB"
+DEFAULT_SHEET_KEY = "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk"
 DEFAULT_WORKSHEET_NAME = "yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
 
 
