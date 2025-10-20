@@ -11,9 +11,33 @@ import io
 from datetime import date
 import datetime as dt
 from typing import Tuple, Optional, List
+import sys
 
 import pandas as pd
 import streamlit as st
+
+# Altair 5.4 currently relies on ``typing.TypedDict`` supporting the ``closed``
+# keyword argument (PEP 705). Python 3.13 removed the provisional support that
+# existed in previous versions, which causes ``TypeError: TypedDict takes no
+# keyword arguments`` during ``import altair``.  We patch ``typing.TypedDict``
+# to use the backport from ``typing_extensions`` when running on Python 3.13 so
+# the import succeeds.
+if sys.version_info >= (3, 13):
+    import typing
+
+    try:  # pragma: no cover - tiny compatibility shim
+        class _AltairClosedTypedDict(typing.TypedDict, closed=True):
+            pass
+    except TypeError:
+        try:
+            from typing_extensions import TypedDict as _TypedDictBackport  # type: ignore
+        except ModuleNotFoundError as exc:  # pragma: no cover - defensive branch
+            raise RuntimeError(
+                "typing_extensions>=4.12 is required when running on Python 3.13"
+            ) from exc
+
+        typing.TypedDict = _TypedDictBackport  # type: ignore[attr-defined]
+        
 import altair as alt
 
 from common import (
