@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import gspread
-from gspread.exceptions import GSpreadException
+from gspread.exceptions import APIError, GSpreadException
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import hashlib
@@ -21,8 +21,16 @@ SCOPES = [
 ]
 
 # 👉 Doğrudan KEY ile açıyoruz (kullanıcının verdiği Sheet ID)
-SHEET_KEY = "1EX6e_r6MaPKh6xi03gmOvhVPHFEsSyuB"
-WORKSHEET_NAME = "yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
+DEFAULT_SHEET_KEY = "1EX6e_r6MaPKh6xi03gmOvhVPHFEsSyuB"
+DEFAULT_WORKSHEET_NAME = "yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
+
+
+def get_sheet_settings() -> Tuple[str, str]:
+    """st.secrets içinden sayfa kimliği ve adını okur, yoksa varsayılanı döner."""
+    sheet_secrets = st.secrets.get("sheet", {})
+    sheet_key = sheet_secrets.get("key", DEFAULT_SHEET_KEY)
+    worksheet_name = sheet_secrets.get("worksheet", DEFAULT_WORKSHEET_NAME)
+    return sheet_key, worksheet_name
 
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
@@ -52,7 +60,8 @@ def load_users_from_secrets() -> Dict[str, Dict]:
 @st.cache_data(show_spinner=False)
 def get_all_users_from_sheet() -> List[str]:
     try:
-        ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+        sheet_key, worksheet_name = get_sheet_settings()
+        ws = open_ws_by_key(sheet_key, worksheet_name)
         rows = ws.get_all_records()
         return sorted({str(r.get("Koc", "")).strip() for r in rows if str(r.get("Koc", "")).strip()})
     except Exception:
@@ -90,7 +99,20 @@ def verify_password(users: Dict[str, Dict], username: str, password: str) -> boo
 @st.cache_data(show_spinner=False)
 def load_yoklama() -> pd.DataFrame:
     try:
-        ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+        sheet_key, worksheet_name = get_sheet_settings()
+        ws = open_ws_by_key(sheet_key, worksheet_name)
+    except APIError as exc:
+        message = str(exc)
+        if "This operation is not supported for this document" in message:
+            message += (
+                "\n\nSeçilen kimlik bir Google E-Tablosu olmayabilir. ID'nin doğru olduğundan ve belgenin Google"
+                " Sheet formatında olduğundan emin olun."
+            )
+        st.error(
+            "Google Sheet'e bağlanırken bir hata oluştu. Lütfen kimlik bilgilerinizi ve sayfa erişiminizi kontrol edin.\n\n"
+            f"Detay: {message}"
+        )
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])
     except GSpreadException as exc:
         st.error(
             "Google Sheet'e bağlanırken bir hata oluştu. Lütfen kimlik bilgilerinizi ve sayfa erişiminizi kontrol edin.\n\n"
@@ -113,7 +135,19 @@ def load_yoklama() -> pd.DataFrame:
 
 def append_yoklama_rows(records: List[Dict]):
     try:
-        ws = open_ws_by_key(SHEET_KEY, WORKSHEET_NAME)
+        sheet_key, worksheet_name = get_sheet_settings()
+        ws = open_ws_by_key(sheet_key, worksheet_name)
+    except APIError as exc:
+        message = str(exc)
+        if "This operation is not supported for this document" in message:
+            message += (
+                "\nBelge bir Google E-Tablosu olmayabilir veya ID yanlış olabilir. Lütfen belgeyi Google Sheets formatına"
+                " dönüştürün ve erişim verdiğinizden emin olun."
+            )
+        raise RuntimeError(
+            "Google Sheet'e yazılırken bir hata oluştu. Kimlik bilgilerinizi ve sayfa erişim izinlerinizi doğrulayın."
+            f"\n\nDetay: {message}"
+        ) from exc
     except GSpreadException as exc:
         raise RuntimeError(
             "Google Sheet'e yazılırken bir hata oluştu. Kimlik bilgilerinizi ve sayfa erişim izinlerinizi doğrulayın."
