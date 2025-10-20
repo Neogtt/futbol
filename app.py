@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import gspread
-from gspread.exceptions import APIError, GSpreadException
+from gspread.exceptions import APIError, GSpreadException, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import hashlib
@@ -121,7 +121,14 @@ def load_yoklama() -> pd.DataFrame:
             "emin olun.\n\n"
             f"Detay: {exc}"
         )
-        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])        
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])
+    except WorksheetNotFound:
+        st.error(
+            "Google Sheet içinde beklenen çalışma sayfası bulunamadı. Lütfen sayfa adının doğru olduğunu ve "
+            "belgede yer aldığını doğrulayın.\n\nDetay: "
+            f"{worksheet_name}"
+        )
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])    
     except APIError as exc:
         message = str(exc)
         if "This operation is not supported for this document" in message:
@@ -163,7 +170,12 @@ def append_yoklama_rows(records: List[Dict]):
             "Google Sheet'e erişim izni doğrulanamadı. Lütfen servis hesabınızla belgeyi paylaştığınızdan "
             "emin olun.\n\n"
             f"Detay: {exc}"
-        ) from exc        
+        ) from exc
+    except WorksheetNotFound as exc:
+        raise RuntimeError(
+            "Google Sheet içinde beklenen çalışma sayfası bulunamadı. Lütfen sayfa adını ve erişim izinlerini "
+            f"kontrol edin.\n\nDetay: {worksheet_name}"
+        ) from exc      
     except APIError as exc:
         message = str(exc)
         if "This operation is not supported for this document" in message:
