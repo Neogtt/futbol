@@ -128,6 +128,13 @@ def load_yoklama() -> pd.DataFrame:
             "belgede yer aldığını doğrulayın.\n\nDetay: "
             f"{worksheet_name}"
         )
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])
+    except WorksheetNotFound:
+        st.error(
+            "Google Sheet içinde beklenen çalışma sayfası bulunamadı. Lütfen sayfa adının doğru olduğunu ve "
+            "belgede yer aldığını doğrulayın.\n\nDetay: "
+            f"{worksheet_name}"
+        )
         return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])    
     except APIError as exc:
         message = str(exc)
