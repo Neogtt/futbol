@@ -42,7 +42,21 @@ def get_gspread_client():
 @st.cache_resource(show_spinner=False)
 def open_ws_by_key(sheet_key: str, worksheet_name: str):
     gc = get_gspread_client()
-    sh = gc.open_by_key(sheet_key)
+    try:
+        sh = gc.open_by_key(sheet_key)
+    except PermissionError as exc:
+        service_email = st.secrets.get("gcp_service_account", {}).get("client_email", "")
+        if service_email:
+            detail = (
+                "Google Sheet'e erişim izni verilmedi. Lütfen belirtilen sayfayı "
+                f"'{service_email}' servis hesabı ile paylaşın."
+            )
+        else:
+            detail = (
+                "Google Sheet'e erişim izni verilmedi. Lütfen servis hesabınızın belgeye erişimi "
+                "olduğundan emin olun."
+            )
+        raise PermissionError(detail) from exc
     return sh.worksheet(worksheet_name)
 
 # =============================
@@ -101,6 +115,13 @@ def load_yoklama() -> pd.DataFrame:
     try:
         sheet_key, worksheet_name = get_sheet_settings()
         ws = open_ws_by_key(sheet_key, worksheet_name)
+    except PermissionError as exc:
+        st.error(
+            "Google Sheet'e erişim izni doğrulanamadı. Lütfen servis hesabınızla belgeyi paylaştığınızdan "
+            "emin olun.\n\n"
+            f"Detay: {exc}"
+        )
+        return pd.DataFrame(columns=["Tarih", "Grup", "OgrenciID", "AdSoyad", "Koc", "Katildi", "Not"])        
     except APIError as exc:
         message = str(exc)
         if "This operation is not supported for this document" in message:
@@ -137,6 +158,12 @@ def append_yoklama_rows(records: List[Dict]):
     try:
         sheet_key, worksheet_name = get_sheet_settings()
         ws = open_ws_by_key(sheet_key, worksheet_name)
+    except PermissionError as exc:
+        raise RuntimeError(
+            "Google Sheet'e erişim izni doğrulanamadı. Lütfen servis hesabınızla belgeyi paylaştığınızdan "
+            "emin olun.\n\n"
+            f"Detay: {exc}"
+        ) from exc        
     except APIError as exc:
         message = str(exc)
         if "This operation is not supported for this document" in message:
