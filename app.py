@@ -22,7 +22,7 @@ SCOPES = [
 
 # 👉 Doğrudan KEY ile açıyoruz (kullanıcının verdiği Sheet ID)
 DEFAULT_SHEET_KEY = "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk"
-DEFAULT_WORKSHEET_NAME = "yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
+DEFAULT_WORKSHEET_NAME = "Yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
 
 
 def get_sheet_settings() -> Tuple[str, str]:
