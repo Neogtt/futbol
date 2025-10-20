@@ -73,7 +73,7 @@ def require_role(role: str) -> None:
     if user and user.get("role") == role:
         return
     st.warning("Bu sayfaya erişim yetkiniz yok. Giriş ekranına yönlendiriliyorsunuz.")
-    st.switch_page("crm.py")
+    st.switch_page("app.py")
     st.stop()
 
 
