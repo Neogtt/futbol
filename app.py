@@ -7,6 +7,8 @@ from datetime import datetime, date
 import hashlib
 from typing import Dict, List, Tuple
 
+TRUTHY_STRINGS = {"1", "true", "yes", "evet", "var", "✔", "x", "✓", "doğru", "active", "aktif"}
+
 # =============================
 # 🔧 UYGULAMA AYARLARI
 # =============================
@@ -22,14 +24,26 @@ SCOPES = [
 
 # 👉 Doğrudan KEY ile açıyoruz (kullanıcının verdiği Sheet ID)
 DEFAULT_SHEET_KEY = "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk"
-DEFAULT_WORKSHEET_NAME = "Yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
+DEFAULT_ATTENDANCE_WORKSHEET_NAME = "Yoklama"  # Tek sayfa: "Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not"
+DEFAULT_STUDENTS_WORKSHEET_NAME = "Ogrenciler"  # Öğrenci listesi: "OgrenciID, AdSoyad, Grup, Koc, Aktif"
 
 
 def get_sheet_settings() -> Tuple[str, str]:
-    """st.secrets içinden sayfa kimliği ve adını okur, yoksa varsayılanı döner."""
+    """st.secrets içinden yoklama sayfası kimliği ve adını okur, yoksa varsayılanı döner."""
     sheet_secrets = st.secrets.get("sheet", {})
     sheet_key = sheet_secrets.get("key", DEFAULT_SHEET_KEY)
-    worksheet_name = sheet_secrets.get("worksheet", DEFAULT_WORKSHEET_NAME)
+    worksheet_name = sheet_secrets.get(
+        "attendance_worksheet",
+        sheet_secrets.get("worksheet", DEFAULT_ATTENDANCE_WORKSHEET_NAME),
+    )
+    return sheet_key, worksheet_name
+
+
+def get_students_sheet_settings() -> Tuple[str, str]:
+    """Öğrenci listesinin okunacağı sayfa ayarlarını döner."""
+    sheet_secrets = st.secrets.get("sheet", {})
+    sheet_key = sheet_secrets.get("students_key", sheet_secrets.get("key", DEFAULT_SHEET_KEY))
+    worksheet_name = sheet_secrets.get("students_worksheet", DEFAULT_STUDENTS_WORKSHEET_NAME)
     return sheet_key, worksheet_name
 
 @st.cache_resource(show_spinner=False)
@@ -74,12 +88,13 @@ def load_users_from_secrets() -> Dict[str, Dict]:
 @st.cache_data(show_spinner=False)
 def get_all_users_from_sheet() -> List[str]:
     try:
-        sheet_key, worksheet_name = get_sheet_settings()
-        ws = open_ws_by_key(sheet_key, worksheet_name)
-        rows = ws.get_all_records()
-        return sorted({str(r.get("Koc", "")).strip() for r in rows if str(r.get("Koc", "")).strip()})
+        df = load_students()
     except Exception:
         return []
+    if df.empty or "Koc" not in df:
+        return []
+    return sorted({str(k).strip() for k in df["Koc"] if str(k).strip()})
+
 
 @st.cache_data(show_spinner=False)
 def get_all_users() -> Dict[str, Dict]:
@@ -157,6 +172,70 @@ def load_yoklama() -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip()
     # Tarih'i tarih tipine çevirmeye çalışma; metin kalabilir. Filtrelemede format kullanacağız.
     if "Katildi" in df:
+        df["Katildi"] = df["Katildi"].astype(str).str.lower().isin(TRUTHY_STRINGS)
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_students() -> pd.DataFrame:
+    empty = pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif"])
+    try:
+        sheet_key, worksheet_name = get_students_sheet_settings()
+        ws = open_ws_by_key(sheet_key, worksheet_name)
+    except PermissionError as exc:
+        st.error(
+            "Öğrenci listesinin bulunduğu Google Sheet erişilemedi. Lütfen belgenin servis hesabı ile paylaşıldığından "
+            "emin olun.\n\n"
+            f"Detay: {exc}"
+        )
+        return empty
+    except WorksheetNotFound:
+        st.error(
+            "Google Sheet içinde 'Ogrenciler' sayfası bulunamadı. Ayarlardan doğru sekme adını kullandığınızdan emin olun."
+        )
+        return empty
+    except APIError as exc:
+        message = str(exc)
+        if "This operation is not supported for this document" in message:
+            message += (
+                "\n\nSeçilen kimlik bir Google E-Tablosu olmayabilir. ID'nin doğru olduğundan ve belgenin Google Sheet formatında"
+                " olduğundan emin olun."
+            )
+        st.error(
+            "Öğrenci listesini okurken bir hata oluştu. Google Sheet kimliğinizi ve erişim izinlerinizi kontrol edin.\n\n"
+            f"Detay: {message}"
+        )
+        return empty
+    except GSpreadException as exc:
+        st.error(
+            "Öğrenci listesini okurken bir hata oluştu. Google Sheet kimliğinizi ve erişim izinlerinizi kontrol edin.\n\n"
+            f"Detay: {exc}"
+        )
+        return empty
+
+    df = pd.DataFrame(ws.get_all_records())
+    if df.empty:
+        return empty
+
+    normalize_cols = ["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif"]
+    for col in normalize_cols:
+        if col in df:
+            df[col] = df[col].astype(str).str.strip()
+
+    if "Aktif" in df:
+        df = df[df["Aktif"].str.lower().isin(TRUTHY_STRINGS)].copy()
+
+    if df.empty:
+        return empty
+
+    sid_series = df["OgrenciID"].astype(str).str.strip() if "OgrenciID" in df else pd.Series([""] * len(df), index=df.index)
+    name_series = df["AdSoyad"].astype(str).str.strip() if "AdSoyad" in df else pd.Series([""] * len(df), index=df.index)
+    df = df[(sid_series != "") | (name_series != "")].copy()
+
+    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc"]:
+        if col not in df:
+            df[col] = ""
+
+
         df["Katildi"] = df["Katildi"].astype(str).str.lower().isin(["1", "true", "yes", "evet", "var", "✔", "x", "✓", "doğru"]) 
     return df
 
@@ -215,19 +294,32 @@ def append_yoklama_rows(records: List[Dict]):
 # =============================
 @st.cache_data(show_spinner=False)
 def get_students_for_coach(username: str) -> pd.DataFrame:
-    df = load_yoklama()
+    df = load_students()
     if df.empty:
-        return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])    
-    # Bu koçla ilişkili tüm öğrenciler (geçmiş kayıtlarından türetilir)
-    df_k = df[df["Koc"].str.lower() == username.lower()].copy()
-    if df_k.empty:
-        return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])    
-    # Her öğrencinin en güncel "Grup" bilgisini almak için tarih sıralayalım (Tarih metin olabilir; stabilize etmek için sondan alacağız)
-    # Aynı OgrenciID + AdSoyad kombinasyonunu tekilleştir.
-    df_k["_order"] = range(len(df_k))
-    df_k.sort_values("_order", ascending=False, inplace=True)
-    df_last = df_k.drop_duplicates(subset=["OgrenciID", "AdSoyad"], keep="first")
-    return df_last[["OgrenciID", "AdSoyad", "Grup", "Koc"]].sort_values("AdSoyad")
+        return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])
+
+    df = df.copy()
+    if "Koc" in df:
+        df = df[df["Koc"].str.lower() == username.lower()].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])
+
+    # Aynı öğrenci birden fazla satırdaysa tekilleştir
+    df = df.drop_duplicates(subset=["OgrenciID", "AdSoyad"], keep="first").copy()
+
+    # Beklenen kolonlar eksikse oluştur
+    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc"]:
+        if col not in df:
+            df[col] = ""
+
+    df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]] = (
+        df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]]
+        .astype(str)
+        .apply(lambda col: col.str.strip())
+    )
+
+    return df[["OgrenciID", "AdSoyad", "Grup", "Koc"]].sort_values("AdSoyad")
 
 # =============================
 # 📱 ARAYÜZ – KOÇ PANELI
@@ -265,7 +357,10 @@ def attendance_view(username: str):
 
     df_students = get_students_for_coach(username)
     if df_students.empty:
-        st.info("Bu kullanıcıya atanmış öğrenci geçmişi bulunamadı. İlk yoklamayı kaydedince liste oluşacak.")
+        st.info(
+            "Bu kullanıcıya atanmış aktif öğrenci bulunamadı. Lütfen Google Sheet'teki 'Ogrenciler' sekmesinde koç atamasını "
+            "ve 'Aktif' sütununu kontrol edin."
+        )
         return
 
     # Aynı gün için önceden girilmiş kayıtları çek (prefill)
@@ -335,7 +430,10 @@ def attendance_view(username: str):
 
 def main():
     st.title("📋 Yoklama – Koç Telefon Paneli")
-    st.caption("Tek sayfa: 'yoklama' – Tarih, Grup, OgrenciID, AdSoyad, Koc, Katildi, Not")
+    st.caption(
+        "Öğrenciler 'Ogrenciler' sekmesinden okunur; yoklamalar 'Yoklama' sekmesine Tarih, Grup, OgrenciID, AdSoyad, Koc, "
+        "Katildi, Not başlıklarıyla kaydedilir."
+    )
 
     users = get_all_users()
     if not users:
