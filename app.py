@@ -235,8 +235,12 @@ def load_students() -> pd.DataFrame:
         if col not in df:
             df[col] = ""
 
-
-        df["Katildi"] = df["Katildi"].astype(str).str.lower().isin(["1", "true", "yes", "evet", "var", "✔", "x", "✓", "doğru"]) 
+    if "Katildi" in df:
+        df["Katildi"] = (
+            df["Katildi"].astype(str).str.strip().str.lower().isin(TRUTHY_STRINGS)
+        )
+    else:
+        df["Katildi"] = False
     return df
 
 
