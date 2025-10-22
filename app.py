@@ -210,6 +210,16 @@ def _normalize_membership_status(value: object) -> Optional[int]:
         return 1
     return None
 
+
+def _is_active_flag(value: object) -> bool:
+    """Return True when a value indicates the student should be listed as aktif/dondurulmuş."""
+
+    normalized = _normalize_membership_status(value)
+    if normalized is not None:
+        return normalized in MEMBERSHIP_STATUS_ACTIVE_CODES
+    return _is_truthy(value)
+
+
 # =============================
 # 🔧 UYGULAMA AYARLARI
 # =============================
@@ -475,7 +485,7 @@ def load_students() -> pd.DataFrame:
             
 
     if "Aktif" in df:
-        active_mask = df["Aktif"].apply(_is_truthy)
+        active_mask = df["Aktif"].apply(_is_active_flag)
         df = df[active_mask].copy()
     
     status_col = _find_membership_status_column(df)
