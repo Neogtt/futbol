@@ -25,6 +25,7 @@ TRUTHY_STRINGS = {
     "acik",
     "açık",
     "open",
+    "geldi",    
 }
 
 MEMBERSHIP_STATUS_LABELS = {
@@ -107,6 +108,14 @@ def _simplify_token(token: str) -> str:
         .replace("ş", "s")
         .replace("ü", "u")
     )
+
+
+def _is_truthy(value: object) -> bool:
+    token = str(value).strip().lower()
+    if not token or token in {"nan", "none"}:
+        return False
+    simplified = _simplify_token(token)
+    return token in TRUTHY_STRINGS or simplified in TRUTHY_STRINGS
 
 
 def _find_membership_status_column(df: pd.DataFrame) -> Optional[str]:
@@ -323,7 +332,7 @@ def load_yoklama() -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip()
     # Tarih'i tarih tipine çevirmeye çalışma; metin kalabilir. Filtrelemede format kullanacağız.
     if "Katildi" in df:
-        df["Katildi"] = df["Katildi"].astype(str).str.lower().isin(TRUTHY_STRINGS)
+        df["Katildi"] = df["Katildi"].apply(_is_truthy)
     return df
 
 @st.cache_data(show_spinner=False)
@@ -382,6 +391,10 @@ def load_students() -> pd.DataFrame:
         if col in df:
             df[col] = df[col].astype(str).str.strip()
 
+    if "Aktif" in df:
+        active_mask = df["Aktif"].apply(_is_truthy)
+        df = df[active_mask].copy()
+    
     status_col = _find_membership_status_column(df)
     if status_col:
         status_codes = df[status_col].apply(_normalize_membership_status)
@@ -411,9 +424,7 @@ def load_students() -> pd.DataFrame:
             df[col] = ""
 
     if "Katildi" in df:
-        df["Katildi"] = (
-            df["Katildi"].astype(str).str.strip().str.lower().isin(TRUTHY_STRINGS)
-        )
+        df["Katildi"] = df["Katildi"].apply(_is_truthy)
     else:
         df["Katildi"] = False
     return df
@@ -577,7 +588,7 @@ def attendance_view(username: str):
         if status_label.lower() == "nan":
             status_label = ""
         status_suffix = f" | Durum: {status_label}" if status_label else ""
-        label = f"{row.AdSoyad} — (ID: {sid}) | Grup: {row.Grup}{status_suffix}"
+        student_label = f"{row.AdSoyad} — (ID: {sid}) | Grup: {row.Grup}{status_suffix}"
         status_code = getattr(row, "UyelikDurumuKodu", None)
         try:
             status_code_int = int(status_code)
@@ -591,7 +602,21 @@ def attendance_view(username: str):
             default_present = False
         if status_code_int == 2 and sid not in pre:
             default_present = False
-        present_map[sid] = st.checkbox(label, value=default_present, key=f"cb_{sid}")
+
+        info_col, choice_col = st.columns([3, 2])
+        with info_col:
+            st.markdown(f"**{student_label}**")
+        with choice_col:
+            default_option = attendance_options[0] if default_present else attendance_options[1]
+            selected_option = st.radio(
+                "Yoklama durumu",
+                attendance_options,
+                index=attendance_options.index(default_option),
+                key=f"att_{sid}",
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+        present_map[sid] = selected_option == attendance_options[0]
         with st.expander("Not (isteğe bağlı)", expanded=False):
             note_map[sid] = st.text_input("Not", value=default_note, key=f"note_{sid}")
 
