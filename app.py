@@ -99,6 +99,12 @@ MEMBERSHIP_STATUS_COLUMN_CANDIDATES = [
 ]
 
 
+ATTENDANCE_OPTIONS = (
+    "✔️ VAR",
+    "✖️ YOK",
+)
+
+
 def _simplify_token(token: str) -> str:
     return (
         token.replace("ç", "c")
@@ -569,7 +575,7 @@ def attendance_view(username: str):
     st.markdown("---")
     st.markdown("### ✅ Yoklama Listesi")
 
-    colA, colB = st.columns([1,1])
+    colA, colB = st.columns([1, 1])
     with colA:
         select_all = st.checkbox("Hepsini **VAR** (✔️) işaretle", value=False)
     with colB:
@@ -580,6 +586,11 @@ def attendance_view(username: str):
 
     present_map = {}
     note_map = {}
+
+    attendance_options = ATTENDANCE_OPTIONS
+    apply_select_all = select_all and not clear_all
+    apply_clear_all = clear_all and not select_all
+
 
     for row in df_students.itertuples(index=False):
         sid = str(row.OgrenciID)
@@ -602,23 +613,36 @@ def attendance_view(username: str):
             default_present = False
         if status_code_int == 2 and sid not in pre:
             default_present = False
+            
+        radio_key = f"att_{date_str}_{sid}"
+        note_key = f"note_{date_str}_{sid}"
 
+        if radio_key not in st.session_state:
+            st.session_state[radio_key] = attendance_options[0] if default_present else attendance_options[1]
+
+        if apply_select_all:
+            st.session_state[radio_key] = attendance_options[0]
+        elif apply_clear_all:
+            st.session_state[radio_key] = attendance_options[1]
         info_col, choice_col = st.columns([3, 2])
         with info_col:
             st.markdown(f"**{student_label}**")
         with choice_col:
-            default_option = attendance_options[0] if default_present else attendance_options[1]
-            selected_option = st.radio(
+            st.radio(
                 "Yoklama durumu",
                 attendance_options,
-                index=attendance_options.index(default_option),
-                key=f"att_{sid}",
+                key=radio_key,
                 horizontal=True,
                 label_visibility="collapsed",
             )
-        present_map[sid] = selected_option == attendance_options[0]
+        present_map[sid] = st.session_state.get(radio_key) == attendance_options[0]
+
+        if note_key not in st.session_state:
+            st.session_state[note_key] = default_note
+
         with st.expander("Not (isteğe bağlı)", expanded=False):
-            note_map[sid] = st.text_input("Not", value=default_note, key=f"note_{sid}")
+            st.text_input("Not", key=note_key)
+        note_map[sid] = st.session_state.get(note_key, "")
 
     st.markdown("---")
     grup_default = df_students["Grup"].mode().iloc[0] if not df_students["Grup"].empty else ""
