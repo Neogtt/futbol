@@ -5,7 +5,7 @@ from gspread.exceptions import APIError, GSpreadException, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import hashlib
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 TRUTHY_STRINGS = {
     "1",
@@ -25,7 +25,16 @@ TRUTHY_STRINGS = {
     "acik",
     "açık",
     "open",
-    "geldi",    
+    "geldi",
+}
+
+# Koç kullanıcı adlarını tabloya ID ile yazmak isteyenler için basit eşleme tablosu.
+# Soldaki değer tabloya yazılacak Koç ID'si, sağdaki değer uygulamada gözükecek isimdir.
+COACH_ID_TO_NAME = {
+    "1": "GOKHAN",
+    "2": "SINAN",
+    "3": "EMRE",
+    "4": "TUGAY", 
 }
 
 MEMBERSHIP_STATUS_LABELS = {
@@ -115,6 +124,11 @@ def _simplify_token(token: str) -> str:
         .replace("ü", "u")
     )
 
+COACH_NAME_TO_ID = {
+    _simplify_token(str(name).strip().lower()): coach_id
+    for coach_id, name in COACH_ID_TO_NAME.items()
+}
+
 
 def _is_truthy(value: object) -> bool:
     token = str(value).strip().lower()
@@ -122,6 +136,36 @@ def _is_truthy(value: object) -> bool:
         return False
     simplified = _simplify_token(token)
     return token in TRUTHY_STRINGS or simplified in TRUTHY_STRINGS
+
+
+def _normalize_coach_id(value: object) -> str:
+    token = str(value).strip()
+    if not token or token.lower() in {"nan", "none"}:
+        return ""
+    try:
+        numeric = int(float(token))
+        return str(numeric)
+    except (TypeError, ValueError):
+        return token
+
+
+def _resolve_coach(value: object) -> Tuple[str, str]:
+    token = str(value).strip()
+    if not token or token.lower() in {"nan", "none"}:
+        return "", ""
+
+    normalized_id = _normalize_coach_id(token)
+    if normalized_id in COACH_ID_TO_NAME:
+        name = COACH_ID_TO_NAME[normalized_id]
+        return name, normalized_id
+
+    simplified = _simplify_token(token.lower())
+    coach_id = COACH_NAME_TO_ID.get(simplified, "")
+    if coach_id:
+        name = COACH_ID_TO_NAME.get(coach_id, token)
+        return name, coach_id
+
+    return token, ""
 
 
 def _find_membership_status_column(df: pd.DataFrame) -> Optional[str]:
@@ -248,9 +292,14 @@ def get_all_users_from_sheet() -> List[str]:
         df = load_students()
     except Exception:
         return []
-    if df.empty or "Koc" not in df:
+    if df.empty:
         return []
-    return sorted({str(k).strip() for k in df["Koc"] if str(k).strip()})
+    users: Set[str] = set()
+    if "Koc" in df:
+        users.update({str(k).strip() for k in df["Koc"] if str(k).strip()})
+    if "KocID" in df:
+        users.update({str(k).strip() for k in df["KocID"] if str(k).strip()})
+    return sorted(users)
 
 
 @st.cache_data(show_spinner=False)
@@ -392,10 +441,38 @@ def load_students() -> pd.DataFrame:
     if df.empty:
         return empty
 
-    normalize_cols = ["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif"]
+    normalize_cols = ["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif", "KocID"]
     for col in normalize_cols:
         if col in df:
             df[col] = df[col].astype(str).str.strip()
+    if "Koc" not in df:
+        df["Koc"] = ""
+    if "KocID" not in df:
+        df["KocID"] = ""
+
+    original_koc = df["Koc"].copy()
+    original_koc_id = df["KocID"].copy()
+    resolved_names: List[str] = []
+    resolved_ids: List[str] = []
+    for raw_id, raw_name in zip(original_koc_id, original_koc):
+        coach_name = ""
+        coach_id = ""
+        for raw_value in (raw_id, raw_name):
+            name_candidate, id_candidate = _resolve_coach(raw_value)
+            if name_candidate and not coach_name:
+                coach_name = str(name_candidate).strip()
+            if id_candidate and not coach_id:
+                coach_id = str(id_candidate).strip()
+            if coach_name and coach_id:
+                break
+        if not coach_name:
+            coach_name = str(raw_name).strip()
+        resolved_names.append(coach_name)
+        resolved_ids.append(coach_id)
+
+    df["Koc"] = resolved_names
+    df["KocID"] = resolved_ids
+            
 
     if "Aktif" in df:
         active_mask = df["Aktif"].apply(_is_truthy)
@@ -425,7 +502,7 @@ def load_students() -> pd.DataFrame:
     name_series = df["AdSoyad"].astype(str).str.strip() if "AdSoyad" in df else pd.Series([""] * len(df), index=df.index)
     df = df[(sid_series != "") | (name_series != "")].copy()
 
-    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc"]:
+    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc", "KocID"]:
         if col not in df:
             df[col] = ""
 
@@ -495,8 +572,43 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])
 
     df = df.copy()
+    username_clean = str(username).strip()
+    username_lower = username_clean.lower()
+    username_simple = _simplify_token(username_lower)
+
+    candidate_names = {username_lower, username_simple}
+    candidate_ids: Set[str] = set()
+    for candidate in {username_clean, username_lower, _normalize_coach_id(username_clean)}:
+        if candidate:
+            candidate_ids.add(candidate)
+
+    if username_clean in COACH_ID_TO_NAME:
+        mapped_name = COACH_ID_TO_NAME[username_clean]
+        candidate_names.add(mapped_name.lower())
+        candidate_names.add(_simplify_token(mapped_name.lower()))
+    if username_simple in COACH_NAME_TO_ID:
+        mapped_id = COACH_NAME_TO_ID[username_simple]
+        candidate_ids.add(mapped_id)
+        mapped_name = COACH_ID_TO_NAME.get(mapped_id)
+        if mapped_name:
+            candidate_names.add(mapped_name.lower())
+            candidate_names.add(_simplify_token(mapped_name.lower()))
+
+    mask = pd.Series([False] * len(df), index=df.index)    
     if "Koc" in df:
-        df = df[df["Koc"].str.lower() == username.lower()].copy()
+        col = df["Koc"].astype(str).str.strip()
+        col_lower = col.str.lower()
+        col_simple = col_lower.apply(_simplify_token)
+        mask = mask | col_lower.isin(candidate_names) | col_simple.isin(candidate_names)
+    if "KocID" in df:
+        col = df["KocID"].astype(str).str.strip()
+        col_lower = col.str.lower()
+        mask = mask | col.isin(candidate_ids) | col_lower.isin(candidate_ids)
+
+    if mask.any():
+        df = df[mask].copy()
+    else:
+        df = df[df["Koc"].str.lower() == username_lower].copy()
 
     if df.empty:
         return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc"])
@@ -505,7 +617,7 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
     df = df.drop_duplicates(subset=["OgrenciID", "AdSoyad"], keep="first").copy()
 
     # Beklenen kolonlar eksikse oluştur
-    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc", "UyelikDurumu"]:
+    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc", "UyelikDurumu", "KocID"]:
         if col not in df:
             df[col] = ""
 
@@ -517,13 +629,13 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
     if "UyelikDurumuKodu" not in df:
         df["UyelikDurumuKodu"] = 1
 
-    df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]] = (
-        df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]]
+    df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc", "KocID"]] = (
+        df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc", "KocID"]]
         .astype(str)
         .apply(lambda col: col.str.strip())
     )
 
-    return df[["OgrenciID", "AdSoyad", "Grup", "Koc", "UyelikDurumu", "UyelikDurumuKodu"]].sort_values("AdSoyad")
+    return df[["OgrenciID", "AdSoyad", "Grup", "Koc", "KocID", "UyelikDurumu", "UyelikDurumuKodu"]].sort_values("AdSoyad")
 
 # =============================
 # 📱 ARAYÜZ – KOÇ PANELI
