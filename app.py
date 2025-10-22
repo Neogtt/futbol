@@ -7,7 +7,25 @@ from datetime import datetime, date
 import hashlib
 from typing import Dict, List, Tuple, Optional
 
-TRUTHY_STRINGS = {"1", "true", "yes", "evet", "var", "✔", "x", "✓", "doğru", "active", "aktif"}
+TRUTHY_STRINGS = {
+    "1",
+    "true",
+    "yes",
+    "evet",
+    "var",
+    "✔",
+    "✔️",
+    "x",
+    "✓",
+    "✅",
+    "doğru",
+    "dogru",
+    "active",
+    "aktif",
+    "acik",
+    "açık",
+    "open",
+}
 
 MEMBERSHIP_STATUS_LABELS = {
     0: "Pasif",
@@ -27,6 +45,10 @@ MEMBERSHIP_STATUS_CODE_MAP = {
     "kapali": 0,
     "kapalı": 0,
     "off": 0,
+    "closed": 0,
+    "✖": 0,
+    "✖️": 0,
+    "❌": 0,    
     "1": 1,
     "true": 1,
     "yes": 1,
@@ -35,6 +57,13 @@ MEMBERSHIP_STATUS_CODE_MAP = {
     "aktif": 1,
     "active": 1,
     "on": 1,
+    "acik": 1,
+    "açık": 1,
+    "open": 1,
+    "✔": 1,
+    "✔️": 1,
+    "✓": 1,
+    "✅": 1,    
     "2": 2,
     "dondurulmuş": 2,
     "dondurulmus": 2,
