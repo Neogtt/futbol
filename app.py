@@ -225,13 +225,22 @@ def sha256_hex(text: str) -> str:
 
 
 def verify_password(users: Dict[str, Dict], username: str, password: str) -> bool:
+    """Verify a user's password, supporting both hashed and plain entries."""    
     if username not in users:
         return False
-    expected_hash = users[username].get("password_hash", "")
-    # Parolasız mod: expected_hash boş ise şifre kontrolü atlanır
-    if not expected_hash:
+    user_info = users[username]
+
+    expected_hash = user_info.get("password_hash", "")
+    expected_plain = user_info.get("password", "")
+
+    # Parolasız mod: hem hash hem düz parola boşsa şifre kontrolü atlanır
+    if not expected_hash and not expected_plain:
         return True
-    return sha256_hex(password) == expected_hash
+
+    if expected_hash:
+        return sha256_hex(password) == expected_hash
+
+    return password == expected_plain
 
 # =============================
 # 📒 YOKLAMA (Tek Sayfa Şeması)
