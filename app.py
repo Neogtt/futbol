@@ -454,7 +454,7 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
         if col not in df:
             df[col] = ""
 
-        if "UyelikDurumu" in df:
+    if "UyelikDurumu" in df:
         df["UyelikDurumu"] = df["UyelikDurumu"].astype(str).str.strip()
     else:
         df["UyelikDurumu"] = MEMBERSHIP_STATUS_LABELS[1]
