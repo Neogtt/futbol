@@ -5,9 +5,122 @@ from gspread.exceptions import APIError, GSpreadException, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import hashlib
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 TRUTHY_STRINGS = {"1", "true", "yes", "evet", "var", "✔", "x", "✓", "doğru", "active", "aktif"}
+
+MEMBERSHIP_STATUS_LABELS = {
+    0: "Pasif",
+    1: "Aktif",
+    2: "Dondurulmuş",
+}
+
+MEMBERSHIP_STATUS_CODE_MAP = {
+    "0": 0,
+    "pasif": 0,
+    "false": 0,
+    "hayır": 0,
+    "hayir": 0,
+    "yok": 0,
+    "no": 0,
+    "inactive": 0,
+    "kapali": 0,
+    "kapalı": 0,
+    "off": 0,
+    "1": 1,
+    "true": 1,
+    "yes": 1,
+    "evet": 1,
+    "var": 1,
+    "aktif": 1,
+    "active": 1,
+    "on": 1,
+    "2": 2,
+    "dondurulmuş": 2,
+    "dondurulmus": 2,
+    "donmus": 2,
+    "frozen": 2,
+    "askida": 2,
+    "askıya": 2,
+    "askiya": 2,
+}
+
+MEMBERSHIP_STATUS_ACTIVE_CODES = {1, 2}
+
+MEMBERSHIP_STATUS_COLUMN_CANDIDATES = [
+    "aktif",
+    "üyelik durumu",
+    "uyelik durumu",
+    "üyelik durum",
+    "uyelik durum",
+    "üyelikdurumu",
+    "uyelikdurumu",
+    "üyelik",
+    "uyelik",
+    "üyelik_durumu",
+    "uyelik_durumu",
+    "üyelik_status",
+    "uyelik_status",
+    "uye durumu",
+    "uyedurumu",
+    "üyedurumu",
+    "durum",
+    "status",
+]
+
+
+def _simplify_token(token: str) -> str:
+    return (
+        token.replace("ç", "c")
+        .replace("ğ", "g")
+        .replace("ı", "i")
+        .replace("ö", "o")
+        .replace("ş", "s")
+        .replace("ü", "u")
+    )
+
+
+def _find_membership_status_column(df: pd.DataFrame) -> Optional[str]:
+    lowered = {col.lower(): col for col in df.columns}
+    for candidate in MEMBERSHIP_STATUS_COLUMN_CANDIDATES:
+        if candidate in lowered:
+            return lowered[candidate]
+    if len(df.columns) >= 2:
+        fallback_col = df.columns[1]
+        series = df[fallback_col]
+        meaningful = False
+        for value in series:
+            token = str(value).strip().lower()
+            if not token or token in {"nan", "none"}:
+                continue
+            simplified = _simplify_token(token)
+            if (
+                token in MEMBERSHIP_STATUS_CODE_MAP
+                or simplified in MEMBERSHIP_STATUS_CODE_MAP
+                or token in TRUTHY_STRINGS
+                or simplified in TRUTHY_STRINGS
+            ):
+                meaningful = True
+                continue
+            meaningful = False
+            break
+        if meaningful:
+            return fallback_col
+    return None
+
+
+def _normalize_membership_status(value: object) -> Optional[int]:
+    token = str(value).strip().lower()
+    if not token or token in {"nan", "none"}:
+        return None
+    simplified = _simplify_token(token)
+    if token in MEMBERSHIP_STATUS_CODE_MAP:
+        return MEMBERSHIP_STATUS_CODE_MAP[token]
+    if simplified in MEMBERSHIP_STATUS_CODE_MAP:
+        return MEMBERSHIP_STATUS_CODE_MAP[simplified]
+    if token in TRUTHY_STRINGS or simplified in TRUTHY_STRINGS:
+        return 1
+    return None
 
 # =============================
 # 🔧 UYGULAMA AYARLARI
@@ -177,7 +290,17 @@ def load_yoklama() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_students() -> pd.DataFrame:
-    empty = pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif"])
+    empty = pd.DataFrame(
+        columns=[
+            "OgrenciID",
+            "AdSoyad",
+            "Grup",
+            "Koc",
+            "Aktif",
+            "UyelikDurumu",
+            "UyelikDurumuKodu",
+        ]
+    )
     try:
         sheet_key, worksheet_name = get_students_sheet_settings()
         ws = open_ws_by_key(sheet_key, worksheet_name)
@@ -221,8 +344,22 @@ def load_students() -> pd.DataFrame:
         if col in df:
             df[col] = df[col].astype(str).str.strip()
 
-    if "Aktif" in df:
-        df = df[df["Aktif"].str.lower().isin(TRUTHY_STRINGS)].copy()
+    status_col = _find_membership_status_column(df)
+    if status_col:
+        status_codes = df[status_col].apply(_normalize_membership_status)
+        status_codes = pd.Series(status_codes, index=df.index, dtype="Int64")
+    else:
+        status_codes = pd.Series([1] * len(df), index=df.index, dtype="Int64")
+
+    df["UyelikDurumuKodu"] = status_codes
+    df["UyelikDurumu"] = (
+        df["UyelikDurumuKodu"].map(MEMBERSHIP_STATUS_LABELS).fillna("")
+    )
+
+    if status_col:
+        mask = df["UyelikDurumuKodu"].isin(MEMBERSHIP_STATUS_ACTIVE_CODES)
+        mask = mask.fillna(False)
+        df = df[mask].copy()
 
     if df.empty:
         return empty
@@ -313,9 +450,17 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
     df = df.drop_duplicates(subset=["OgrenciID", "AdSoyad"], keep="first").copy()
 
     # Beklenen kolonlar eksikse oluştur
-    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc"]:
+    for col in ["OgrenciID", "AdSoyad", "Grup", "Koc", "UyelikDurumu"]:
         if col not in df:
             df[col] = ""
+
+        if "UyelikDurumu" in df:
+        df["UyelikDurumu"] = df["UyelikDurumu"].astype(str).str.strip()
+    else:
+        df["UyelikDurumu"] = MEMBERSHIP_STATUS_LABELS[1]
+
+    if "UyelikDurumuKodu" not in df:
+        df["UyelikDurumuKodu"] = 1
 
     df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]] = (
         df.loc[:, ["OgrenciID", "AdSoyad", "Grup", "Koc"]]
@@ -323,7 +468,7 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
         .apply(lambda col: col.str.strip())
     )
 
-    return df[["OgrenciID", "AdSoyad", "Grup", "Koc"]].sort_values("AdSoyad")
+    return df[["OgrenciID", "AdSoyad", "Grup", "Koc", "UyelikDurumu", "UyelikDurumuKodu"]].sort_values("AdSoyad")
 
 # =============================
 # 📱 ARAYÜZ – KOÇ PANELI
@@ -389,12 +534,24 @@ def attendance_view(username: str):
 
     for row in df_students.itertuples(index=False):
         sid = str(row.OgrenciID)
-        label = f"{row.AdSoyad} — (ID: {sid}) | Grup: {row.Grup}"
+        status_label = getattr(row, "UyelikDurumu", "")
+        status_label = str(status_label).strip()
+        if status_label.lower() == "nan":
+            status_label = ""
+        status_suffix = f" | Durum: {status_label}" if status_label else ""
+        label = f"{row.AdSoyad} — (ID: {sid}) | Grup: {row.Grup}{status_suffix}"
+        status_code = getattr(row, "UyelikDurumuKodu", None)
+        try:
+            status_code_int = int(status_code)
+        except (TypeError, ValueError):
+            status_code_int = None
         default_present = pre.get(sid, (False, ""))[0]
         default_note = pre.get(sid, (False, ""))[1]
         if select_all:
             default_present = True
         if clear_all:
+            default_present = False
+        if status_code_int == 2 and sid not in pre:
             default_present = False
         present_map[sid] = st.checkbox(label, value=default_present, key=f"cb_{sid}")
         with st.expander("Not (isteğe bağlı)", expanded=False):
