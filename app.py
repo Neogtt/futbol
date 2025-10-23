@@ -7,244 +7,61 @@ from datetime import datetime, date
 import hashlib
 from typing import Dict, List, Tuple, Optional, Set
 
-TRUTHY_STRINGS = {
-    "1",
-    "true",
-    "yes",
-    "evet",
-    "var",
-    "✔",
-    "✔️",
-    "x",
-    "✓",
-    "✅",
-    "doğru",
-    "dogru",
-    "active",
-    "aktif",
-    "acik",
-    "açık",
-    "open",
-    "geldi",
-}
+# Google Sheets API ile bağlantı için gerekli ayarlar
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+DEFAULT_SHEET_KEY = "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk"
+DEFAULT_ATTENDANCE_WORKSHEET_NAME = "Yoklama"
+DEFAULT_STUDENTS_WORKSHEET_NAME = "Ogrenciler"
 
-COACH_ID_TO_NAME = {
-    "1": "GOKHAN",
-    "2": "SINAN",
-    "3": "EMRE",
-    "4": "TUGAY", 
-}
-
-MEMBERSHIP_STATUS_LABELS = {
-    0: "Pasif",
-    1: "Aktif",
-    2: "Dondurulmuş",
-}
-
-MEMBERSHIP_STATUS_CODE_MAP = {
-    "0": 0,
-    "pasif": 0,
-    "false": 0,
-    "hayır": 0,
-    "hayir": 0,
-    "yok": 0,
-    "no": 0,
-    "inactive": 0,
-    "kapali": 0,
-    "kapalı": 0,
-    "off": 0,
-    "closed": 0,
-    "✖": 0,
-    "✖️": 0,
-    "❌": 0,    
-    "1": 1,
-    "true": 1,
-    "yes": 1,
-    "evet": 1,
-    "var": 1,
-    "aktif": 1,
-    "active": 1,
-    "on": 1,
-    "acik": 1,
-    "açık": 1,
-    "open": 1,
-    "✔": 1,
-    "✔️": 1,
-    "✓": 1,
-    "✅": 1,    
-    "2": 2,
-    "dondurulmuş": 2,
-    "dondurulmus": 2,
-    "donmus": 2,
-    "frozen": 2,
-    "askida": 2,
-    "askıya": 2,
-    "askiya": 2,
-}
-
-MEMBERSHIP_STATUS_ACTIVE_CODES = {1, 2}
-
-MEMBERSHIP_STATUS_COLUMN_CANDIDATES = [
-    "aktif",
-    "üyelik durumu",
-    "uyelik durumu",
-    "üyelik durum",
-    "uyelik durum",
-    "üyelikdurumu",
-    "üyelikdurumu",
-    "üyelik",
-    "uyelik",
-    "üyelik_durumu",
-    "üyelik_durumu",
-    "üyelik_status",
-    "üyelik_status",
-    "uye durumu",
-    "uyedurumu",
-    "üyedurumu",
-    "durum",
-    "status",
-]
-
-def _simplify_token(token: str) -> str:
-    return (
-        token.replace("ç", "c")
-        .replace("ğ", "g")
-        .replace("ı", "i")
-        .replace("ö", "o")
-        .replace("ş", "s")
-        .replace("ü", "u")
-    )
-
-COACH_NAME_TO_ID = {
-    _simplify_token(str(name).strip().lower()): coach_id
-    for coach_id, name in COACH_ID_TO_NAME.items()
-}
-
-def _normalize_colname(name: str) -> str:
-    s = _simplify_token(str(name)).lower().strip()
-    s = s.replace("_", "").replace(" ", "")
-    return s
-
-CANONICAL_COLMAP = {
-    "ogrenciid": "OgrenciID",
-    "ogrenci": "OgrenciID",
-    "id": "OgrenciID",
-    "adsoyad": "AdSoyad",
-    "adisoyadi": "AdSoyad",
-    "adisoyad": "AdSoyad",
-    "isim": "AdSoyad",
-    "adi": "AdSoyad",
-    "ad": "AdSoyad",
-    "grup": "Grup",
-    "sinif": "Grup",
-    "sınıf": "Grup",
-    "koc": "Koc",
-    "kocadi": "Koc",
-    "kocoach": "Koc",
-    "kocisim": "Koc",
-    "kocid": "KocID",
-    "coachid": "KocID",
-    "aktif": "Aktif",
-    "active": "Aktif",
-    "uyedurumu": "Aktif",
-    "durum": "Aktif",
-    "uyelikdurumu": "UyelikDurumu",
-    "uyelikdurum": "UyelikDurumu",
-    "uyelik": "UyelikDurumu",
-    "status": "UyelikDurumu",
-}
-
-def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    renames = {}
-    for c in df.columns:
-        key = _normalize_colname(c)
-        if key in CANONICAL_COLMAP:
-            renames[c] = CANONICAL_COLMAP[key]
-    if renames:
-        df = df.rename(columns=renames)
-    return df
-
-def _is_truthy(value: object) -> bool:
-    token = str(value).strip().lower()
-    if not token or token in {"nan", "none"}:
-        return False
-    simplified = _simplify_token(token)
-    return token in TRUTHY_STRINGS or simplified in TRUTHY_STRINGS
-
-def _normalize_coach_id(value: object) -> str:
-    token = str(value).strip()
-    if not token or token.lower() in {"nan", "none"}:
-        return ""
-    try:
-        numeric = int(float(token))
-        return str(numeric)
-    except (TypeError, ValueError):
-        return token
-
-def _resolve_coach(value: object) -> Tuple[str, str]:
-    token = str(value).strip()
-    if not token or token.lower() in {"nan", "none"}:
-        return "", ""
-    normalized_id = _normalize_coach_id(token)
-    if normalized_id in COACH_ID_TO_NAME:
-        name = COACH_ID_TO_NAME[normalized_id]
-        return name, normalized_id
-    simplified = _simplify_token(token.lower())
-    coach_id = COACH_NAME_TO_ID.get(simplified, "")
-    if coach_id:
-        name = COACH_ID_TO_NAME.get(coach_id, token)
-        return name, coach_id
-    return token, ""
+# Service Account ile bağlantı
+def get_gspread_client():
+    """Google Sheets API Client oluşturur."""
+    service_info = st.secrets["gcp_service_account"]
+    credentials = Credentials.from_service_account_info(service_info, scopes=SCOPES)
+    return gspread.authorize(credentials)
 
 @st.cache_data(show_spinner=False)
 def load_students() -> pd.DataFrame:
-    empty = pd.DataFrame(columns=[
-        "OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif", "UyelikDurumu", "UyelikDurumuKodu"
-    ])
+    """Öğrenci listesini yükler."""
     try:
-        sheet_key = st.secrets["sheet"].get("key", "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk")
-        worksheet_name = st.secrets["sheet"].get("students_worksheet", "Ogrenciler")
-        gc = gspread.authorize(Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets"]))
+        sheet_key = st.secrets["sheet"].get("key", DEFAULT_SHEET_KEY)
+        worksheet_name = st.secrets["sheet"].get("students_worksheet", DEFAULT_STUDENTS_WORKSHEET_NAME)
+        gc = get_gspread_client()
         ws = gc.open_by_key(sheet_key).worksheet(worksheet_name)
         df = pd.DataFrame(ws.get_all_records())
     except Exception as e:
         st.error(f"Veri okunamadı: {e}")
-        return empty
+        return pd.DataFrame(columns=["OgrenciID", "AdSoyad", "Grup", "Koc", "Aktif", "UyelikDurumu"])
     
+    # Canonicalize column names
     df = _canonicalize_columns(df)
-    if "Koc" not in df:
-        df["Koc"] = ""
-    if "KocID" not in df:
-        df["KocID"] = ""
-    
-    resolved_names = []
-    resolved_ids = []
-    for _, row in df.iterrows():
-        coach_name, coach_id = _resolve_coach(row["Koc"])
-        resolved_names.append(coach_name)
-        resolved_ids.append(coach_id)
-    
-    df["Koc"] = resolved_names
-    df["KocID"] = resolved_ids
-
-    # Aktif öğrenci filtresi
-    status_col = df["UyelikDurumu"].map(lambda x: x == 1)
-    df = df[status_col]
-
     return df
 
+# Kullanıcıları secrets'ten yükler
 @st.cache_data(show_spinner=False)
-def get_students_for_coach(username: str) -> pd.DataFrame:
-    df = load_students()
-    if df.empty:
-        return df
-    username_clean = username.strip().lower()
-    username_simple = _simplify_token(username_clean)
-    
-    mask = df["Koc"].apply(lambda x: x.strip().lower() == username_clean or _simplify_token(x.strip().lower()) == username_simple)
-    df = df[mask]
-    return df
+def load_users_from_secrets() -> Dict[str, Dict]:
+    creds = st.secrets.get("credentials", {})
+    return {k: dict(v) for k, v in creds.items()}
 
+# Kullanıcı doğrulama
+def verify_password(users: Dict[str, Dict], username: str, password: str) -> bool:
+    """Kullanıcı adı ve şifreyi doğrula"""
+    if username not in users:
+        return False
+    user_info = users[username]
+
+    expected_hash = user_info.get("password_hash", "")
+    expected_plain = user_info.get("password", "")
+
+    if not expected_hash and not expected_plain:
+        return True
+
+    if expected_hash:
+        return sha256_hex(password) == expected_hash
+
+    return password == expected_plain
+
+# Giriş yapma paneli
 def login_view(users: Dict[str, Dict]) -> Tuple[str, bool]:
     st.markdown("### 👋 Koç Girişi")
     usernames = list(users.keys())
@@ -319,7 +136,7 @@ def main():
     st.title("📋 Yoklama – Koç Telefon Paneli")
     st.caption("Öğrenciler 'Ogrenciler' sekmesinden okunur; yoklamalar 'Yoklama' sekmesine kaydedilir.")
     
-    users = get_all_users()
+    users = load_users_from_secrets()
     if not users:
         st.warning("Kullanıcı listesi boş görünüyor.")
     
