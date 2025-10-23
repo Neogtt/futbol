@@ -1,7 +1,8 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import gspread
-from gspread.exceptions import APIError, GSpreadException, WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from typing import Dict, List, Tuple, Optional, Set
@@ -11,27 +12,22 @@ from typing import Dict, List, Tuple, Optional, Set
 # =============================
 st.set_page_config(page_title="Yoklama – Koç Telefon Paneli", layout="wide")
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 DEFAULT_SHEET_KEY = "1WogWAT7rt6MANHORr2gd5E787Q_Zo0KtfrQkU1Tazfk"
-DEFAULT_ATTENDANCE_WORKSHEET_NAME = "Yoklama"
 DEFAULT_STUDENTS_WORKSHEET_NAME = "Ogrenciler"
+DEFAULT_ATTENDANCE_WORKSHEET_NAME = "Yoklama"
 
-# Koç ID ↔ İsim
+# Koç ID ↔ İsim eşleşmesi
 COACH_ID_TO_NAME = {"1": "GOKHAN", "2": "SINAN", "3": "EMRE", "4": "TUGAY"}
-COACH_NAME_TO_ID = {n.lower(): i for i, n in COACH_ID_TO_NAME.items()}
+COACH_NAME_TO_ID = {name.lower(): cid for cid, name in COACH_ID_TO_NAME.items()}
 
-# Üyelik durum etiketleri ve aktif/frozen kodlar
 MEMBERSHIP_STATUS_LABELS = {0: "Pasif", 1: "Aktif", 2: "Dondurulmuş"}
-MEMBERSHIP_STATUS_ACTIVE_CODES = {1, 2}  # Sadece 1 olsun derseniz {1} yapın.
+# Dondurulmuş (2) öğrencileri de listelesin istiyorsanız {1,2}; sadece Aktif için {1}
+MEMBERSHIP_STATUS_ACTIVE_CODES = {1, 2}
 
 TRUTHY_STRINGS = {
     "1","true","yes","evet","var","✔","✔️","x","✓","✅","active","aktif","açık","acik","on","open","geldi"
 }
-
 ATTENDANCE_OPTIONS = ("✔️ VAR", "✖️ YOK")
 
 # =============================
@@ -39,8 +35,9 @@ ATTENDANCE_OPTIONS = ("✔️ VAR", "✖️ YOK")
 # =============================
 def _simplify_token(s: str) -> str:
     return (
-        s.replace("ç","c").replace("ğ","g").replace("ı","i")
-         .replace("ö","o").replace("ş","s").replace("ü","u")
+        str(s)
+        .replace("ç","c").replace("ğ","g").replace("ı","i")
+        .replace("ö","o").replace("ş","s").replace("ü","u")
     )
 
 def _normalize_colname(name: str) -> str:
@@ -50,19 +47,15 @@ def _normalize_colname(name: str) -> str:
 CANONICAL_COLMAP = {
     # ID
     "ogrenciid": "OgrenciID", "id": "OgrenciID", "ogrenci": "OgrenciID",
-
     # Ad Soyad
     "adsoyad": "AdSoyad", "adisoyadi": "AdSoyad", "adisoyad": "AdSoyad",
     "isim": "AdSoyad", "adi": "AdSoyad", "ad": "AdSoyad",
-
     # Grup
-    "grup": "Grup", "sinif": "Grup", "sinifigrubu": "Grup",
-
-    # Koç/KoçID
+    "grup": "Grup", "sinif": "Grup", "sınıf": "Grup",
+    # Koç
     "koc": "Koc", "kocadi": "Koc", "coach": "Koc", "coachname": "Koc",
     "kocid": "KocID", "coachid": "KocID",
-
-    # Üyelik Durumu (sayısal/kelime)
+    # Üyelik Durumu
     "uyelikdurumu": "UyelikDurumu", "uyelikdurum": "UyelikDurumu",
     "uyelik": "UyelikDurumu", "uyedurumu": "UyelikDurumu",
     "status": "UyelikDurumu", "durum": "UyelikDurumu",
@@ -81,30 +74,24 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.rename(columns=renames)
     return df
 
-def _is_truthy(value: object) -> bool:
-    token = str(value).strip().lower()
-    if not token or token in {"nan","none"}: return False
-    simple = _simplify_token(token)
-    return token in TRUTHY_STRINGS or simple in TRUTHY_STRINGS
-
 def _normalize_coach_pair(raw_value: object) -> Tuple[str, str]:
     """
-    Girdi '2' ise -> ('SINAN','2'), 'SINAN' ise -> ('SINAN','2') gibi isim/ID çifti döndürür.
-    Bilinmiyorsa ('ham değer','') döner.
+    '2' → ('SINAN','2'), 'SINAN' → ('SINAN','2'); bilinmiyorsa ('ham','')
     """
     t = str(raw_value).strip()
     if not t or t.lower() in {"nan","none"}:
         return "", ""
-    # Sayısal ID mi?
+    # ID?
     try:
         num = str(int(float(t)))
         if num in COACH_ID_TO_NAME:
             return COACH_ID_TO_NAME[num], num
-    except:  # isim olabilir
+    except:
         pass
+    # İsim?
     name = t.strip()
-    id_guess = COACH_NAME_TO_ID.get(name.lower(),"")
-    return (name if name else "", id_guess)
+    cid = COACH_NAME_TO_ID.get(name.lower(),"")
+    return (name if name else "", cid)
 
 def _get_sheet_settings():
     s = st.secrets.get("sheet", {})
@@ -120,9 +107,8 @@ def _gspread_client():
 
 @st.cache_data(show_spinner=False)
 def load_users_from_secrets() -> Dict[str, Dict]:
-    # secrets.toml: [credentials.X] password="..."
+    # secrets.toml → [credentials.X] password="..."
     creds = st.secrets.get("credentials", {})
-    # Streamlit secrets nested TOML -> {'X': {'password': '...'}, ...}
     return {k: dict(v) for k, v in creds.items()}
 
 # =============================
@@ -153,38 +139,35 @@ def load_students() -> pd.DataFrame:
     names, ids = [], []
     for raw in df["Koc"]:
         name, cid = _normalize_coach_pair(raw)
-        # KocID kolonu boşsa oradan da deneriz
-        names.append(name)
-        ids.append(cid)
-    # Eğer KocID sütununda veri varsa boşları oradan doldur
+        names.append(name); ids.append(cid)
+
+    # KocID sütunu doluysa boşları oradan tamamla
     for i, cid in enumerate(ids):
-        if not cid and str(df.loc[i,"KocID"]).strip():
-            ids[i] = str(df.loc[i,"KocID"]).strip()
-            if ids[i] in COACH_ID_TO_NAME:
-                names[i] = COACH_ID_TO_NAME[ids[i]]
+        if not cid:
+            cid2 = str(df.loc[i,"KocID"]).strip()
+            if cid2:
+                ids[i] = cid2
+                names[i] = COACH_ID_TO_NAME.get(cid2, names[i])
 
     df["Koc"] = names
     df["KocID"] = ids
 
-    # Üyelik durumu sayısına çevir
+    # Üyelik durumunu koda çevir
     codes = []
     for v in df["UyelikDurumu"]:
-        s = str(v).strip().lower()
+        s = _simplify_token(str(v)).lower().strip()
         if s in {"1","aktif","active"}: codes.append(1)
-        elif s in {"2","dondurulmus","dondurulmuş","frozen","askida","askıya","askiya"}: codes.append(2)
+        elif s in {"2","dondurulmus","dondurulmuş","frozen","askida","askiya","askıya"}: codes.append(2)
         elif s in {"0","pasif","inactive","kapali","kapalı","off"}: codes.append(0)
         else:
-            # boş görünüyorsa aktif say
             try:
-                n = int(float(s))
-                n = n if n in (0,1,2) else 1
-                codes.append(n)
+                n = int(float(s)); codes.append(n if n in (0,1,2) else 1)
             except:
                 codes.append(1)
     df["UyelikDurumuKodu"] = codes
     df["UyelikDurumu"] = [MEMBERSHIP_STATUS_LABELS.get(c,"") for c in codes]
 
-    # Aktif/frozen filtre
+    # Aktif/dondurulmuş filtre
     df = df[df["UyelikDurumuKodu"].isin(MEMBERSHIP_STATUS_ACTIVE_CODES)].copy()
 
     # Temizlik
@@ -211,7 +194,7 @@ def load_yoklama() -> pd.DataFrame:
 
     if df.empty:
         return pd.DataFrame(columns=["Tarih","Grup","OgrenciID","AdSoyad","Koc","Katildi","Not","Timestamp"])
-    # normalize
+
     for c in ["Grup","OgrenciID","AdSoyad","Koc","Not"]:
         if c in df: df[c] = df[c].astype(str).str.strip()
     if "Katildi" in df:
@@ -223,7 +206,7 @@ def append_yoklama_rows(records: List[Dict]):
     gc = _gspread_client()
     ws = gc.open_by_key(key).worksheet(ws_att)
 
-    # Başlık yoksa oluştur
+    # Başlık yoksa yaz
     all_vals = ws.get_all_values()
     if not all_vals:
         ws.update("A1:H1", [["Tarih","Grup","OgrenciID","AdSoyad","Koc","Katildi","Not","Timestamp"]])
@@ -251,23 +234,17 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
     uname = str(username).strip()
     uname_lower = uname.lower()
 
-    # Kullanıcı adı isimse doğrudan, ID ise tersinden eşle
-    cand_ids = set()
-    cand_names = set()
-
-    # Eğer "SINAN" gibi isim
-    cand_names.update({uname, uname_lower, _simplify_token(uname_lower)})
+    cand_ids: Set[str] = set()
+    cand_names: Set[str] = {uname, uname_lower, _simplify_token(uname_lower)}
     if uname_lower in COACH_NAME_TO_ID:
-        cid = COACH_NAME_TO_ID[uname_lower]
-        cand_ids.add(cid)
+        cand_ids.add(COACH_NAME_TO_ID[uname_lower])
 
-    # Eğer "2" gibi ID ile girildiyse:
+    # Eğer kullanıcı adı ID ise
     try:
         num = str(int(float(uname)))
         cand_ids.add(num)
         if num in COACH_ID_TO_NAME:
-            cand_names.add(COACH_ID_TO_NAME[num])
-            cand_names.add(COACH_ID_TO_NAME[num].lower())
+            cand_names.add(COACH_ID_TO_NAME[num]); cand_names.add(COACH_ID_TO_NAME[num].lower())
     except:
         pass
 
@@ -276,7 +253,7 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
         col = df["Koc"].astype(str)
         col_lower = col.str.lower()
         col_simple = col_lower.apply(_simplify_token)
-        mask = mask | col_lower.isin({n.lower() for n in cand_names}) | col_simple.isin({ _simplify_token(n.lower()) for n in cand_names})
+        mask = mask | col_lower.isin({n.lower() for n in cand_names}) | col_simple.isin({_simplify_token(n.lower()) for n in cand_names})
     if "KocID" in df:
         col = df["KocID"].astype(str).str.strip()
         col_lower = col.str.lower()
@@ -293,17 +270,23 @@ def get_students_for_coach(username: str) -> pd.DataFrame:
     return out[["OgrenciID","AdSoyad","Grup","Koc","KocID","UyelikDurumu","UyelikDurumuKodu"]].sort_values("AdSoyad")
 
 # =============================
-# GİRİŞ (Basit şifre)
+# GİRİŞ – Basit şifre (secrets)
 # =============================
 def load_user_dict() -> Dict[str, Dict]:
-    return load_users_from_secrets()
+    users = load_users_from_secrets()
+    if users:
+        return users
+    # secrets yoksa, sheet'teki koç isimlerinden parolasız mod
+    df = load_students()
+    names = sorted(set([n for n in df.get("Koc", pd.Series([], dtype=str)).astype(str).tolist() if n]))
+    return {n: {"password": ""} for n in names}
 
 def verify_password(users: Dict[str, Dict], username: str, password: str) -> bool:
     if username not in users:
         return False
     expected_plain = str(users[username].get("password",""))
+    # Parola tanımlanmamışsa kullanıcı adı yeterli (parolasız mod)
     if expected_plain == "":
-        # Parolasız mod: sadece kullanıcı adı yeterli (isterseniz False yapın)
         return True
     return str(password) == expected_plain
 
@@ -322,7 +305,7 @@ def login_view(users: Dict[str, Dict]) -> Tuple[str, bool]:
     return st.session_state.get("auth_user"), ok
 
 # =============================
-# ARAYÜZ – YOKLAMA
+# ARAYÜZ – GRUP FİLTRELİ YOKLAMA
 # =============================
 def attendance_view(username: str):
     st.markdown(f"#### 👤 Oturum: **{username}**")
@@ -332,21 +315,36 @@ def attendance_view(username: str):
         load_students.clear(); get_students_for_coach.clear(); load_yoklama.clear()
         st.experimental_rerun()
 
-    # Debug expander
-    with st.expander("🔎 Debug (geçici)"):
-        df_all = load_students()
-        st.write("Sütunlar:", list(df_all.columns))
-        st.write("Koc uniq:", df_all.get("Koc", pd.Series(dtype=str)).unique().tolist() if not df_all.empty else "—")
-        st.write("KocID uniq:", df_all.get("KocID", pd.Series(dtype=str)).unique().tolist() if not df_all.empty else "—")
-
-    today = date.today()
-    selected_date = st.date_input("Tarih", value=today, format="DD.MM.YYYY")
-    date_str = selected_date.strftime("%d.%m.%Y")
-
-    df_students = get_students_for_coach(username)
-    if df_students.empty:
-        st.info("Bu kullanıcıya atanmış **aktif** öğrenci bulunamadı. Lütfen Ogrenciler sekmesinde 'Koc' (isim veya ID) ve 'UYELIK DURUMU' (1/2) değerlerini kontrol edin.")
+    # Koça ait öğrenciler
+    df_students_full = get_students_for_coach(username)
+    if df_students_full.empty:
+        st.info("Bu kullanıcıya atanmış **aktif** öğrenci bulunamadı. Ogrenciler sekmesinde 'Koc' (isim veya ID) ve 'UyelikDurumu' (1/2) değerlerini kontrol edin.")
         return
+
+    # Grup seçenekleri (benzersiz, boşları at)
+    groups_all = sorted(g for g in pd.Series(df_students_full["Grup"]).fillna("").astype(str).str.strip().unique() if g)
+    default_groups = st.session_state.get("selected_groups", groups_all)
+    selected_groups = st.multiselect(
+        "📚 Grup seçin (birden fazla seçebilirsiniz)",
+        options=groups_all,
+        default=default_groups,
+        placeholder="Grup seçin…"
+    )
+    st.session_state["selected_groups"] = selected_groups
+
+    # Seçime göre filtre
+    df_students = df_students_full.copy()
+    if selected_groups:
+        df_students = df_students[df_students["Grup"].isin(selected_groups)].copy()
+
+    if df_students.empty:
+        st.warning("Seçtiğiniz gruplarda öğrenci bulunamadı.")
+        return
+
+    # Tarih
+    today = date.today()
+    selected_date = st.date_input("📅 Tarih", value=today, format="DD.MM.YYYY")
+    date_str = selected_date.strftime("%d.%m.%Y")
 
     st.markdown("---")
     st.markdown("### ✅ Yoklama Listesi")
@@ -360,7 +358,7 @@ def attendance_view(username: str):
         note_key  = f"note_{date_str}_{sid}"
 
         if radio_key not in st.session_state:
-            st.session_state[radio_key] = ATTENDANCE_OPTIONS[1]  # default YOK
+            st.session_state[radio_key] = ATTENDANCE_OPTIONS[1]  # default: YOK
 
         c1, c2 = st.columns([3,2])
         with c1: st.markdown(f"**{student_label}**")
