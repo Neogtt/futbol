@@ -23,7 +23,7 @@ COACH_NAME_TO_ID = {name.lower(): cid for cid, name in COACH_ID_TO_NAME.items()}
 
 MEMBERSHIP_STATUS_LABELS = {0: "Pasif", 1: "Aktif", 2: "Dondurulmuş"}
 # Dondurulmuş (2) öğrencileri de listelesin istiyorsanız {1,2}; sadece Aktif için {1}
-MEMBERSHIP_STATUS_ACTIVE_CODES = {1, 2}
+MEMBERSHIP_STATUS_ACTIVE_CODES = {1}
 
 TRUTHY_STRINGS = {
     "1","true","yes","evet","var","✔","✔️","x","✓","✅","active","aktif","açık","acik","on","open","geldi"
