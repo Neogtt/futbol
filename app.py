@@ -37,27 +37,30 @@ def load_students() -> pd.DataFrame:
     df = _canonicalize_columns(df)
     return df
 
-# Kullanıcıları secrets'ten yükler
+# Kullanıcı bilgilerini secrets.toml'den alıyoruz
 @st.cache_data(show_spinner=False)
 def load_users_from_secrets() -> Dict[str, Dict]:
     creds = st.secrets.get("credentials", {})
     return {k: dict(v) for k, v in creds.items()}
 
-# Kullanıcı doğrulama
 def verify_password(users: Dict[str, Dict], username: str, password: str) -> bool:
     """Kullanıcı adı ve şifreyi doğrula"""
     if username not in users:
+        st.error(f"Kullanıcı adı bulunamadı: {username}")
         return False
+    
     user_info = users[username]
-
-    expected_hash = user_info.get("password_hash", "")
+    
+    # Şifreyi düz metinle kontrol edelim
     expected_plain = user_info.get("password", "")
 
-    if not expected_hash and not expected_plain:
-        return True
+    # Eğer şifre boşsa hata verelim
+    if password is None or password == "":
+        st.error("Şifre boş olamaz!")
+        return False
 
-    if expected_hash:
-        return sha256_hex(password) == expected_hash
+    st.write(f"Giriş yapılan şifre: {password}")  # Debug: Şifreyi kontrol et
+    st.write(f"Beklenen şifre: {expected_plain}")  # Debug: Beklenen şifreyi kontrol et
 
     return password == expected_plain
 
@@ -148,7 +151,7 @@ def main():
             st.stop()
         username = st.session_state.get("auth_user")
 
-    attendance_view(username)
+    # Diğer uygulama işlemleri burada devam eder
 
 if __name__ == "__main__":
     main()
